@@ -1,0 +1,40 @@
+{
+  "assets": [
+    {
+      "id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "tokenSymbol": "AAA",
+      "tokenName": "Asset A • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0xd95B44124e475743a7589e68F3D74008A5536D44",
+          "chainId": 4663,
+          "networkName": "Robinhood Chain"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_ACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/a.png",
+      "tokenDecimals": 18,
+      "isin": "US0000000001"
+    },
+    {
+      "id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "tokenSymbol": "BBB",
+      "tokenName": "Asset B • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0xd95b44124e475743a7589e68f3d74008a5536d44",
+          "chainId": 4663,
+          "networkName": "Robinhood Chain"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_ACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/b.png",
+      "tokenDecimals": 18,
+      "isin": "US0000000002"
+    }
+  ]
+}

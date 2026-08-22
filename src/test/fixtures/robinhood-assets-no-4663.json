@@ -1,0 +1,22 @@
+{
+  "assets": [
+    {
+      "id": "0x00000000000000000000000000000000022015c295294037bfe416d3e45327b9",
+      "tokenSymbol": "CRM",
+      "tokenName": "Salesforce • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0xd95B44124e475743a7589e68F3D74008A5536D44",
+          "chainId": 1,
+          "networkName": "Ethereum"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_ACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/0xd95b44124e475743a7589e68f3d74008a5536d44.png",
+      "tokenDecimals": 18,
+      "isin": "US79466L3024"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "assets": [
+    {
+      "id": "0x00000000000000000000000000000000022015c295294037bfe416d3e45327b9",
+      "tokenSymbol": "CRM",
+      "tokenName": "Salesforce • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0xd95B44124e475743a7589e68F3D74008A5536D44",
+          "chainId": 4663,
+          "networkName": "Robinhood Chain"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_ACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/0xd95b44124e475743a7589e68f3d74008a5536d44.png",
+      "tradingCapabilities": {
+        "market": { "whole": "TRADING_STATUS_TRADABLE", "fractional": "TRADING_STATUS_TRADABLE" }
+      },
+      "tokenDecimals": 18,
+      "isin": "US79466L3024"
+    },
+    {
+      "id": "0x0000000000000000000000000000000002c4d1ce31ec4310b2c507c921a52b70",
+      "tokenSymbol": "P",
+      "tokenName": "Everpure • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0x1Cdad396DB64BDa184d5182A97Dd9B3C62100b7D",
+          "chainId": 4663,
+          "networkName": "Robinhood Chain"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_ACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/0x1cdad396db64bda184d5182a97dd9b3c62100b7d.png",
+      "tradingCapabilities": null,
+      "tokenDecimals": 18,
+      "isin": "US74624M1027"
+    },
+    {
+      "id": "0x0000000000000000000000000000000003bd94e037654c6a9828af2137edd3c3",
+      "tokenSymbol": "CIEN",
+      "tokenName": "Ciena • Robinhood Token",
+      "deployments": [
+        {
+          "contractAddress": "0x44f6D488021f8233B9416294d1FE9b1fEe28382d",
+          "chainId": 4663,
+          "networkName": "Robinhood Chain"
+        }
+      ],
+      "currentMultiplier": "1.000000000000000000",
+      "pendingMultiplier": "",
+      "status": "ASSET_STATUS_INACTIVE",
+      "logoUrl": "https://cdn.robinhood.com/ncw_assets/logos/0x44f6d488021f8233b9416294d1fe9b1fee28382d.png",
+      "tradingCapabilities": {},
+      "tokenDecimals": 18,
+      "isin": "US1717793095"
+    }
+  ]
+}
