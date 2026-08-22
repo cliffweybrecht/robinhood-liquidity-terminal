@@ -20,7 +20,7 @@ liquidity, order simulation) depends on this foundation being correct.
   canonical stock token asset list).
 - Validates the response against a Zod schema built from the *actual
   observed* upstream shape (not assumed from docs alone — see
-  [Discovered API shape](#discovered-api-shape)).
+  [Discovered Robinhood API shape](#discovered-robinhood-api-shape)).
 - Filters to assets that have a deployment on **chain ID 4663**
   (Robinhood Chain).
 - Normalizes each into an internal `CanonicalRobinhoodAsset` domain
@@ -79,7 +79,7 @@ This separation means:
   (`tradingCapabilities`, `isin`, `pendingMultiplier`, `networkName`)
   never leak into the domain model or the public API.
 
-## Discovered API shape
+## Discovered Robinhood API shape
 
 The response shape below was confirmed against the **live** endpoint
 during development, not assumed from documentation. It differs from the
@@ -239,6 +239,151 @@ const asset = await getRobinhoodAssetByAddress("0xd95b...44"); // case-insensiti
 Each call performs a fresh upstream fetch — see
 [Known limitations](#known-limitations).
 
+## Phase 2: Dexscreener Pool Discovery and Normalization
+
+Phase 2 answers a second, narrower question, always starting from a
+Phase 1 canonical address: **"what Dexscreener liquidity pools currently
+exist for this exact canonical Robinhood Stock Token contract?"** It does
+**not** aggregate liquidity across pools, compare against Robinhood's
+reference price, or attempt executable liquidity — those remain later
+phases (see [Phase 3 direction](#phase-3-direction-not-implemented)).
+
+### How pool discovery works
+
+1. Start from a canonical `CanonicalRobinhoodAsset` (symbol/address
+   resolved through Phase 1 — see below, this step is never skipped).
+2. Fetch `GET https://api.dexscreener.com/token-pairs/v1/robinhood/{contractAddress}`
+   (`src/providers/dexscreener/client.ts`), Zod-validated
+   (`src/providers/dexscreener/schema.ts`).
+3. Validate **every** returned pair independently
+   (`src/domain/pool/normalize.ts`): does it actually contain the exact
+   canonical address (case-insensitively) as `baseToken` or `quoteToken`?
+   Is `chainId` really `"robinhood"`? Are the pair/token addresses
+   well-formed? A pool failing any check is excluded from the result, not
+   treated as a whole-batch failure (see
+   [Zero pools vs. provider failure](#zero-pools-vs-provider-failure)).
+4. Normalize accepted pools into `LiquidityPool` and deduplicate (see
+   [Deduplication strategy](#deduplication-strategy)).
+
+### Why canonical contract participation is revalidated
+
+Phase 1 establishes that an address *is* a canonical Robinhood Stock
+Token. Phase 2 additionally must confirm, **per pool**, that Dexscreener's
+`baseToken.address`/`quoteToken.address` actually match that exact
+address — not merely that we asked Dexscreener about the right token.
+Dexscreener aggregates data from many independent, permissionless DEXes;
+nothing stops a scam pool from being indexed under a similar-looking
+address, and nothing guarantees Dexscreener's own indexing never mixes up
+which token is on which side. Re-validating identity at the pool level,
+rather than trusting "we queried for NVDA so every result must be NVDA,"
+is the same fail-closed posture Phase 1 applies to Robinhood's own data.
+
+### Why ticker matching is never used for identity
+
+Exactly as in Phase 1: `baseToken.symbol`/`quoteToken.symbol`/`name`
+strings from Dexscreener are preserved on each `LiquidityPool` for
+display and provenance, but **never** used to decide whether a pool
+belongs to the canonical asset. Only `baseToken.address`/
+`quoteToken.address`, compared case-insensitively against the Phase 1
+canonical address, decide that. `LiquidityPool.canonicalAssetSymbol` is
+always the *Phase 1* symbol, never copied from Dexscreener's labels.
+
+### Zero pools vs. provider failure
+
+Empirically, `GET /token-pairs/v1/{chainId}/{tokenAddress}` returns
+**HTTP 200 with `[]`** for a token with no pools, an unrecognized chain
+ID, or even a malformed token address — Dexscreener never 404s or errors
+on bad input. This means:
+
+- A successful `getDexScreenerPoolsBySymbol("XYZ")` call that resolves
+  `XYZ` through Phase 1 but finds `pools: []` is a **legitimate result**
+  — that Stock Token genuinely has no indexed DEX liquidity yet.
+- This is entirely distinct from a `DexScreenerNetworkError`,
+  `DexScreenerTimeoutError`, `DexScreenerHttpError`,
+  `DexScreenerInvalidJsonError`, or `DexScreenerSchemaValidationError` —
+  each a thrown, typed failure, never silently coerced into `[]`.
+- Because Dexscreener won't reject a bad chain ID or address for us, the
+  per-pool `chainId`/address re-validation described above is doing real
+  work defensively even though, in practice, the live endpoint's own
+  chain-scoping means those specific checks are unlikely to ever
+  trigger — they exist because we cannot prove they won't.
+
+### Deduplication strategy
+
+Pools are deduplicated on **`chainId` + `pairAddress`** (case-insensitive
+on the address). If Dexscreener returns the same pool more than once:
+
+- **Materially identical** duplicate records (agree on every normalized
+  field, ignoring `pairAddress` casing) are silently collapsed to one.
+- **Conflicting** duplicates (same pool identity, disagreeing field
+  values) throw `DuplicatePoolConflictError` rather than silently
+  picking one — an integrity problem, not a display decision, mirroring
+  Phase 1's treatment of duplicate canonical addresses.
+
+### `pairAddress` is not always a contract address
+
+`pairAddress` is typed as viem's `Hex`, not `Address`. Live data showed
+Uniswap v4 pools (managed by a singleton `PoolManager` rather than a
+per-pool deployed contract) reporting a 32-byte PoolId instead of a
+20-byte address — confirmed on 19 of 30 live NVDA pools. Critically,
+`labels` is **not** a reliable discriminator for this: one live pool
+carried the label `"v4"` but used an ordinary 20-byte address. Both
+`src/providers/dexscreener/schema.ts` and the independent domain-layer
+check in `src/domain/pool/address.ts` key off the actual hex length (40
+vs. 64 characters), not the label.
+
+### Provider/domain separation (Phase 2)
+
+Same split as Phase 1: `src/providers/dexscreener/schema.ts` mirrors
+Dexscreener's actual wire format (bare array response, numeric-string
+prices, dual-length `pairAddress`) and is validated independently of
+anything Robinhood-specific. `src/domain/pool/types.ts` defines the
+stable `LiquidityPool` shape the rest of the app depends on — Dexscreener
+response types never reach `src/app/**` directly.
+
+### API
+
+#### `GET /api/assets/{symbol}/pools`
+
+```json
+{
+  "data": {
+    "asset": { "symbol": "NVDA", "name": "NVIDIA • Robinhood Token", "contractAddress": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" },
+    "poolCount": 30,
+    "pools": [ { "provider": "dexscreener", "dexId": "uniswap", "pairAddress": "0xd4EB...", "canonicalAssetSide": "base", "liquidityUsd": 2762395.14, "volume24h": 13386716.29, "buys24h": 10166, "sells24h": 9316, "dexScreenerUrl": "https://dexscreener.com/robinhood/...", "labels": ["v3"] } ]
+  }
+}
+```
+
+`poolCount` is the count of **accepted, unique, validated** pools — not
+raw provider records. Errors: `404` unknown symbol, `409` ambiguous
+symbol (inherited from Phase 1), `502`/`504` Dexscreener provider
+failures, `500` integrity conflicts (`DuplicatePoolConflictError`) or
+unexpected errors.
+
+#### Programmatic API (`src/domain/pool`)
+
+```ts
+import {
+  getDexScreenerPoolsForAsset,
+  getDexScreenerPoolsBySymbol,
+  getDexScreenerPoolsByAddress,
+} from "@/domain/pool";
+
+const { asset, pools } = await getDexScreenerPoolsBySymbol("nvda");
+const byAddr = await getDexScreenerPoolsByAddress("0xd0601c...eec");
+```
+
+`getDexScreenerPoolsBySymbol`/`getDexScreenerPoolsByAddress` **always**
+resolve through Phase 1 first (`getRobinhoodAssetBySymbol`/
+`getRobinhoodAssetByAddress`) — an unresolvable, ambiguous, or malformed
+symbol/address never reaches Dexscreener. The lower-level
+`fetchDexScreenerPairs(chainId, tokenAddress, options)` in
+`src/providers/dexscreener` does accept arbitrary addresses (for
+reuse/testability) — it is intentionally *not* exported from the public
+domain API surface as a way to look up pools; only the canonical-gated
+functions above are.
+
 ## Running the application
 
 ```bash
@@ -254,66 +399,91 @@ npm run lint      # eslint
 npm run build     # next build (production build)
 ```
 
-No API keys or secrets are required for Phase 1 — `/rhj/assets` is a
-public, unauthenticated endpoint.
+No API keys or secrets are required for either phase — both `/rhj/assets`
+and Dexscreener's `/token-pairs/v1` are public, unauthenticated
+endpoints. Dexscreener documents a 60 requests/minute limit on this
+endpoint; Phase 2 makes exactly one Dexscreener request per pool
+discovery call (one asset at a time, only when a user visits its page or
+calls its API route — no bulk/background fetching), which stays well
+under that limit without any additional client-side rate limiting.
 
 ## Project scope
 
 **Implemented (Phase 1):**
 - Canonical Robinhood asset registry (fetch, validate, normalize, index).
 - `GET /api/assets`.
-- A minimal page rendering the registry (proves consumption end-to-end;
-  intentionally not the liquidity dashboard described in the product
-  vision).
+- A minimal page rendering the registry.
+
+**Implemented (Phase 2):**
+- Dexscreener pool discovery for one canonical asset at a time, with
+  per-pool canonical-address and chain-ID revalidation.
+- `GET /api/assets/{symbol}/pools`.
+- `getDexScreenerPoolsForAsset/BySymbol/ByAddress` domain API, gated on
+  Phase 1 canonical resolution.
+- `/assets/{symbol}` page showing the normalized pool list (DEX, pair,
+  addresses, liquidity, volume, buys/sells, Dexscreener link).
 
 **Explicitly NOT implemented yet:**
-- Dexscreener ingestion or pool discovery.
-- Liquidity aggregation, displayed vs. executable liquidity.
-- Robinhood reference-price comparison.
-- On-chain quoting, price-impact curves, order simulation.
-- Historical data, PostgreSQL/Drizzle persistence, charts, alerts,
-  wallet connection, trading, authentication, production deployment.
+- Liquidity aggregation across pools (total, USDG-specific, or
+  cross-pool volume), ranking/leaderboard, liquidity score.
+- Robinhood reference-price comparison, premium/discount.
+- Executable liquidity, Uniswap V3/V4 quoting, routing, order simulator.
+- Historical data, PostgreSQL/Drizzle persistence, Redis, background
+  workers, charts, alerts, wallet connection, trading, authentication,
+  production deployment.
 
-These are intentionally out of scope for Phase 1 per the project's
-incremental build plan; see `Phase 2 direction` below for what's next.
+These are intentionally out of scope per the project's incremental build
+plan; see [Phase 3 direction](#phase-3-direction-not-implemented) below.
 
 ## Known limitations
 
-- **No caching layer.** Every call to `getRobinhoodAssets()` — including
-  every page load and every `/api/assets` request — performs a fresh
-  upstream fetch. Robinhood's API itself caches for ~15s server-side, so
-  this is not incorrect, just not optimized. Deliberately deferred:
-  introducing caching prematurely would add complexity (invalidation,
-  staleness policy) before there's a proven need — Phase 2's pool data
-  will clarify what a shared caching/persistence strategy should look
-  like across both provider integrations.
-- **Whole-response schema failure** (see above) means a single malformed
-  asset in an otherwise-valid 194-asset response takes down the entire
-  registry fetch. Acceptable for Phase 1's fail-closed posture; may need
-  refinement if upstream data quality turns out to be inconsistent.
-- The home page is a minimal proof of consumption, not the liquidity
-  leaderboard UI described in the product vision.
+- **No caching layer.** Every call to `getRobinhoodAssets()` or
+  `getDexScreenerPoolsFor*()` performs a fresh upstream fetch. Both
+  providers cache briefly server-side (Robinhood ~15s, Dexscreener's
+  response headers advertise `max-age=30`), so this is not incorrect,
+  just not optimized. Deliberately deferred for both phases — introducing
+  caching prematurely would add complexity (invalidation, staleness
+  policy, and now two providers) before there's a proven need.
+- **Whole-response schema failure** at each provider's HTTP boundary
+  (see above) means a single malformed record in an otherwise-valid
+  response takes down that entire fetch. Acceptable for the project's
+  fail-closed posture; may need refinement if upstream data quality
+  turns out to be inconsistent. Note this is *not* true of individual
+  pool rejection within an otherwise-valid Dexscreener response — a
+  malformed or non-participating pool is excluded, not a batch failure
+  (see [Zero pools vs. provider failure](#zero-pools-vs-provider-failure)).
+- The asset-pools page is a minimal proof of consumption (DEX, pair,
+  liquidity, volume, buys/sells, link) — not the liquidity leaderboard or
+  aggregate metrics described in the product vision.
+- Pool rejection reasons (`PoolRejectionReason` — wrong chain, invalid
+  address, doesn't contain canonical asset, etc.) are computed and
+  tested but not currently surfaced through the HTTP API or UI, only
+  used internally to decide inclusion/exclusion.
 
 ## Unresolved risks
 
-- Robinhood's `/rhj/assets` schema is undocumented beyond what was
-  observed live; an upstream field-shape change would surface as
-  `RobinhoodSchemaValidationError` (fails closed, as intended) but there
-  is currently no alerting on that beyond the request failing.
+- Both providers' schemas are undocumented beyond what was observed
+  live; an upstream field-shape change surfaces as a
+  `*SchemaValidationError` (fails closed, as intended) but there is
+  currently no alerting on that beyond the request failing.
 - No live-network smoke test is included in the automated suite (by
-  design, per the Phase 1 requirement that core tests stay
-  deterministic) — a manual `curl localhost:3000/api/assets` was used to
-  confirm live-network behavior during development but is not enforced
-  by CI.
+  design — core tests stay deterministic) — manual `curl` smoke tests
+  against `localhost:3000/api/assets` and
+  `localhost:3000/api/assets/NVDA/pools` were used to confirm
+  live-network behavior during development but are not enforced by CI.
+- Dexscreener's dual-length `pairAddress` behavior (20-byte address vs.
+  32-byte Uniswap v4 PoolId) was reverse-engineered from one asset's live
+  data (NVDA, 30 pools); it's possible other DEXes on Robinhood Chain use
+  a third identifier shape not yet observed, which would surface as
+  `INVALID_PAIR_ADDRESS` rejections rather than a crash.
 
-## Phase 2 direction (not implemented)
+## Phase 3 direction (not implemented)
 
-**Dexscreener pool discovery and normalization**: take canonical
-addresses from this registry, query Dexscreener's
-`/token-pairs/v1/{chainId}/{tokenAddress}` for each, validate that the
-canonical contract actually participates in each returned pool, and
-normalize pool-level liquidity/volume/transaction/price/quote-asset data
-— preserving provenance back to Dexscreener and keeping pool-level detail
-available even once aggregate metrics are introduced. Explicitly not
-started: liquidity aggregation, executable liquidity, or any UI beyond
-what's needed to prove pool discovery works.
+**Displayed liquidity aggregation across pools**: sum `liquidityUsd`
+across a canonical asset's accepted pools (and separately, USDG-quoted
+liquidity specifically), aggregate 5m/1h/6h/24h volume and buy/sell
+counts, and identify the single largest pool/DEX by liquidity — while
+still preserving pool-level detail (never collapsing the pool list into
+just a total). This is explicitly *displayed* liquidity aggregation, not
+executable liquidity — the distinction from on-chain quoting/simulation
+remains a later phase after that.

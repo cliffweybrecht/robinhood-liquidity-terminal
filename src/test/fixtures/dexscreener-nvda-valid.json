@@ -1,0 +1,64 @@
+[
+  {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3",
+    "pairAddress": "0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3",
+    "labels": ["v3"],
+    "baseToken": {
+      "address": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "name": "NVIDIA • Robinhood Token",
+      "symbol": "NVDA"
+    },
+    "quoteToken": {
+      "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "name": "Global Dollar",
+      "symbol": "USDG"
+    },
+    "priceNative": "215.1838",
+    "priceUsd": "215.18",
+    "txns": {
+      "m5": { "buys": 26, "sells": 19 },
+      "h1": { "buys": 340, "sells": 353 },
+      "h6": { "buys": 1391, "sells": 1043 },
+      "h24": { "buys": 10166, "sells": 9316 }
+    },
+    "volume": { "h24": 13386716.29, "h6": 1210948.77, "h1": 366849.22, "m5": 13319.76 },
+    "priceChange": { "h1": -0.3, "h6": -0.11, "h24": -1.13 },
+    "liquidity": { "usd": 2762395.14, "base": 4390.08415, "quote": 1817719 },
+    "fdv": 5824092,
+    "marketCap": 4740142,
+    "pairCreatedAt": 1784631726000
+  },
+  {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0x401bc4b106c6deac5c66c251743efce2776a7eb0ce49d122d870308a4d209e43",
+    "pairAddress": "0x401bc4b106c6deac5c66c251743efce2776a7eb0ce49d122d870308a4d209e43",
+    "labels": ["v4"],
+    "baseToken": {
+      "address": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "name": "NVIDIA • Robinhood Token",
+      "symbol": "NVDA"
+    },
+    "quoteToken": {
+      "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+      "name": "WETH",
+      "symbol": "WETH"
+    },
+    "priceNative": "0.08855",
+    "priceUsd": "215.048",
+    "txns": {
+      "m5": { "buys": 1, "sells": 0 },
+      "h1": { "buys": 24, "sells": 12 },
+      "h6": { "buys": 37, "sells": 19 },
+      "h24": { "buys": 75, "sells": 120 }
+    },
+    "volume": { "h24": 6429.63, "h6": 2700.78, "h1": 1961.43, "m5": 39.88 },
+    "priceChange": { "h24": -1.59 },
+    "liquidity": { "usd": 37469.67, "base": 88.9718, "quote": 7.551 },
+    "fdv": 5820417,
+    "marketCap": 4737152,
+    "pairCreatedAt": null
+  }
+]

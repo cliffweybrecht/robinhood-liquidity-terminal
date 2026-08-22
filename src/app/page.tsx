@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getRobinhoodAssets, ROBINHOOD_CHAIN_ID } from "@/domain/asset";
 import type { CanonicalRobinhoodAsset } from "@/domain/asset";
 
@@ -52,7 +53,14 @@ export default async function Home() {
                   key={asset.contractAddress}
                   className="border-b border-neutral-900"
                 >
-                  <td className="py-2 pr-4 font-mono">{asset.symbol}</td>
+                  <td className="py-2 pr-4 font-mono">
+                    <Link
+                      href={`/assets/${asset.symbol}`}
+                      className="text-blue-400 hover:underline"
+                    >
+                      {asset.symbol}
+                    </Link>
+                  </td>
                   <td className="py-2 pr-4">{asset.name}</td>
                   <td className="py-2 pr-4 font-mono text-xs text-neutral-400">
                     {asset.contractAddress}
