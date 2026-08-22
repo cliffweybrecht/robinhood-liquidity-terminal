@@ -402,7 +402,7 @@ acceptable price impact — concentrated-liquidity AMMs can have that
 liquidity positioned outside the immediately tradeable price range.
 Determining actual swap capacity requires on-chain quoting/simulation,
 which is explicitly **not** implemented yet (see
-[Phase 4 direction](#phase-4-direction-not-implemented)).
+[Phase 5 direction](#phase-5-direction-not-implemented)).
 
 To keep this distinction impossible to miss, the codebase and UI never
 use terms like "buy capacity," "executable depth," "available to buy,"
@@ -578,6 +578,212 @@ executable-liquidity disclaimer always visible. No home-page leaderboard
 yet (see [Project scope](#project-scope) below) — this remains
 one-asset-at-a-time.
 
+## Phase 4: Bulk Market Snapshot and Liquidity Leaderboard
+
+Phase 4 answers a market-wide question for the first time: **"what does
+displayed liquidity look like across the entire canonical Robinhood
+Stock Token universe right now?"** It reuses Phase 3's per-asset math
+unchanged — this phase is orchestration, rate limiting, caching, and
+presentation, not new liquidity arithmetic.
+
+### Current provider rate limit (re-verified for Phase 4, not assumed from Phase 2/3)
+
+`GET /token-pairs/v1/{chainId}/{tokenAddress}` has **no rate limit
+published anywhere in Dexscreener's current docs** — only adjacent
+endpoint categories (`token-profiles`, `ads`, `metas`) explicitly state
+"60 requests per minute." Live response headers (re-checked for this
+phase) show `cache-control: public, max-age=30` via Cloudflare, no
+`X-RateLimit-*` headers, unchanged from Phase 2/3. Robinhood's
+`/rhj/assets` live response carries no `Cache-Control` header at all —
+its "~15s" cache claim is doc-text only, not independently verifiable
+from headers.
+
+Since no endpoint-specific number exists, the bulk fetch strategy below
+treats the **one number Dexscreener does publish anywhere on this API**
+(60 req/min) as the ceiling to design under, rather than assuming a more
+generous unconfirmed figure. This is a conservative choice, not a
+confirmed guarantee — see "Known limitations."
+
+### Bounded concurrency + rate limiting
+
+`src/lib/concurrency/limiter.ts` is a generic, provider-agnostic
+scheduler (not specific to Dexscreener) enforcing two independent
+constraints simultaneously:
+
+- **`DEXSCREENER_BULK_CONCURRENCY`** (default `2`) — max requests
+  in flight at once.
+- **`DEXSCREENER_REQUEST_INTERVAL_MS`** (default `1000`) — minimum
+  spacing between successive request *starts*, enforced globally.
+
+The interval, not the concurrency, is what actually caps throughput at
+≤60/min: raising concurrency alone doesn't let more requests through per
+minute, it only lets slow requests overlap instead of queueing behind
+each other's latency. `Promise.all(assets.map(...))` with unconstrained
+parallelism is never used.
+
+### Snapshot build time — measured, not guessed
+
+For 194 assets at the default settings, the interval schedule alone
+imposes a floor of `(194 − 1) × 1000ms ≈ 193s`. The live smoke test
+(below) measured an actual full-snapshot build of **196.8 seconds
+(~3.3 minutes)** at an effective rate of **~59.1 requests/minute** — this
+is reported directly in every snapshot's `refreshDurationMs`, and the UI
+never implies the leaderboard was refreshed at the instant the page
+loaded (see "Freshness metadata" below).
+
+### Cache strategy and TTL
+
+`src/lib/cache/ttlCache.ts` is a generic single-value, single-flight,
+TTL-based async cache (not specific to market snapshots).
+`src/domain/market/cache.ts` wires it to `buildMarketLiquiditySnapshot`:
+
+- **Fresh** (age ≤ TTL): returns the cached snapshot immediately, no
+  provider calls.
+- **Stale or missing**: calls `produce()` and awaits the result.
+- **Single-flight**: if 20 requests arrive while the cache is
+  stale/missing, `produce()` still runs exactly once — every caller
+  joins the same in-flight promise rather than triggering its own
+  194-asset refresh. (Tested directly in `ttlCache.test.ts`.)
+
+**A real bug found and fixed during Phase 4's live verification, worth
+documenting because it's non-obvious:** a plain module-level `const
+snapshotCache = createTtlCache(...)` is *not* reliably a true singleton
+across this app's two entry points. `src/app/page.tsx` and
+`src/app/api/market/liquidity/route.ts` are separate Next.js bundler
+entries; a live two-request test (cold `/api/market/liquidity`, ~197s,
+then `/`) showed the home page triggering an entirely separate ~197s
+rebuild instead of reusing the just-built cache — each entry point had
+independently evaluated its own copy of the module, defeating
+single-flight *between* them (each still correctly single-flighted
+*within* itself). The fix: back the singleton with `globalThis`
+(`src/domain/market/cache.ts`), which is genuinely process-wide
+regardless of which bundle first imports the module — a well-known
+pattern for exactly this class of Next.js gotcha (the same one commonly
+used for shared DB connections). Re-verified live after the fix: cold
+`/api/market/liquidity` (197s) → `/` (0.07s) → `/api/market/liquidity`
+again (0.003s), all three sharing one snapshot.
+
+**`MARKET_SNAPSHOT_TTL_MS`** defaults to **5 minutes (300000ms)**. This
+is a deliberate departure from a generic "tens of seconds" suggestion:
+since building a snapshot itself takes ~3.3 minutes under the
+rate-limit-respecting config above, a shorter TTL would mean the
+snapshot is already "stale" again almost as soon as it finishes,
+degenerating into near-continuous refreshing. 5 minutes gives roughly
+1.5× headroom over the measured build time while still refreshing
+roughly 10+ times an hour.
+
+Stale-while-revalidate (serving a stale snapshot immediately while
+refreshing in the background) was considered and rejected for this
+phase: it would add a second code path and a "how stale is too stale to
+show" policy decision for a use case a simple block-and-await already
+serves correctly, given the TTL is already sized well above the build
+time — there's no evidence it's needed yet.
+
+### Partial failure semantics
+
+One broken asset never fails the whole snapshot.
+`buildMarketLiquiditySnapshot` uses `Promise.allSettled`, not
+`Promise.all`, over the limiter-scheduled per-asset work — every asset's
+outcome (success or failure) is collected independently. A failed
+asset's contract address and symbol are recorded in `failures[]` with a
+stable category (`DEXSCREENER_TIMEOUT`, `DEXSCREENER_NETWORK`,
+`DEXSCREENER_HTTP`, `DEXSCREENER_INVALID_RESPONSE`,
+`DEXSCREENER_SCHEMA_INVALID`, `POOL_INTEGRITY_CONFLICT`, `UNEXPECTED`)
+and a human-readable message — never a raw stack trace, and **never**
+converted into `displayedLiquidityUsd: 0`. A zero-pool asset (Dexscreener
+genuinely returns `[]`) is a **success** with `poolCount: 0` and
+`displayedLiquidityUsd: null` — the live snapshot below found 106 such
+assets, correctly present in `rows`, not in `failures`.
+
+### Efficient registry reuse
+
+`buildMarketLiquiditySnapshot` calls `getRobinhoodAssets()` **exactly
+once** per snapshot, then calls `getDexScreenerPoolsForAsset(asset)`
+directly per already-resolved canonical asset — deliberately *not*
+`getDexScreenerPoolsBySymbol`/`getRobinhoodAssetBySymbol`, which would
+each re-resolve the canonical registry and turn one snapshot into ~194
+additional Robinhood requests. (Verified with a dedicated test asserting
+the registry fetch is called exactly once regardless of asset count.)
+
+### Market snapshot domain model
+
+`src/domain/market/types.ts` defines `MarketLiquiditySnapshot` and
+`MarketLiquidityRow` — deliberately *not* `profiles`, since a row is a
+projection (`projectLiquidityProfileToMarketRow`, pure field selection,
+zero arithmetic) of Phase 3's `AssetLiquidityProfile`, not a second
+independent liquidity implementation. `refreshStartedAt` +
+`generatedAt` + `refreshDurationMs` are all carried on every snapshot,
+so "how fresh is this" is always answerable from the data itself, not
+implied by when the HTTP response arrived.
+
+### API
+
+#### `GET /api/market/liquidity`
+
+```json
+{
+  "data": {
+    "generatedAt": "2026-08-22T17:19:56.904Z",
+    "refreshStartedAt": "2026-08-22T17:16:40.072Z",
+    "refreshDurationMs": 196832,
+    "assetsRequested": 194,
+    "assetsSucceeded": 194,
+    "assetsFailed": 0,
+    "completeness": { "complete": true, "successPct": 100 },
+    "rows": [ { "asset": { "symbol": "NVDA", "...": "..." }, "displayedLiquidityUsd": 4508145.59, "...": "..." } ],
+    "failures": []
+  },
+  "cache": { "status": "fresh", "ageMs": 0, "ttlMs": 300000 }
+}
+```
+
+`cache` is a sibling of `data`, not nested inside it — it describes
+*this response's* freshness, not the market data itself. Errors here can
+only come from the Phase 1 registry fetch failing entirely (502/504) —
+every per-asset Dexscreener/pool failure is already inside
+`data.failures`, never thrown.
+
+### Leaderboard UI
+
+The home page (`src/app/page.tsx`) is now the real leaderboard: a
+freshness bar (generated-at, build duration, cache status, N/M
+successful), an expandable failures list (native `<details>`, shown only
+when incomplete — no dedicated incident UI), and
+`MarketLeaderboard` (`src/app/_components/MarketLeaderboard.tsx`, a
+client component) rendering Stock / Displayed Liquidity / USDG Liquidity
+/ Observed 24h Volume / Pools / DEXes / Top-3 Concentration, sticky
+header, horizontal scroll for narrow viewports. The executable-liquidity
+disclaimer from Phase 3 is repeated here — a market-wide leaderboard is
+exactly where it's most tempting to over-read "liquidity" as "buy
+capacity."
+
+`src/app/loading.tsx` provides a visible loading state for the (rare, at
+most once per TTL window) case where a visitor's request is the one that
+triggers a cold-cache build — this can legitimately take several
+minutes, and the loading screen says so rather than showing a blank
+page.
+
+### Search / sort behavior
+
+`src/app/_lib/marketTable.ts` — pure, dependency-free functions,
+directly unit-tested, with zero network calls:
+
+- **`filterMarketRows(rows, query)`**: case-insensitive substring match
+  against symbol or name. Typing in the search box never triggers a
+  request — it filters the rows the server already fetched.
+- **`sortMarketRowsByColumn(rows, column, direction)`**: numeric sort
+  (never lexicographic) over Displayed Liquidity, USDG Liquidity,
+  Observed 24h Volume, Pool Count, DEX Count, or Top-3 Concentration.
+  Rows with `null` in the sorted column always sort **last**, regardless
+  of direction — a documented, deliberate choice (missing data
+  deprioritized both ways) rather than nulls flipping to the top on
+  ascending sort.
+
+The API's own default row order (`sortMarketRows` in
+`src/domain/market/project.ts`: displayed liquidity descending, nulls
+last, symbol ascending tie-break) is just the initial client state —
+the UI re-sorts client-side from there.
+
 ## Running the application
 
 ```bash
@@ -595,12 +801,23 @@ npm run build     # next build (production build)
 
 No API keys or secrets are required for any phase — both `/rhj/assets`
 and Dexscreener's `/token-pairs/v1` are public, unauthenticated
-endpoints. Dexscreener documents a 60 requests/minute limit on this
-endpoint; both Phase 2 and Phase 3 make exactly one Dexscreener request
-per asset lookup (one asset at a time, only when a user visits its page
-or calls its API route — no bulk/background fetching, no leaderboard),
-which stays well under that limit without any additional client-side
-rate limiting.
+endpoints. Phase 2/3's single-asset lookups make exactly one Dexscreener
+request each, well under any plausible limit. Phase 4's bulk snapshot is
+the one place volume matters — see
+[Phase 4](#phase-4-bulk-market-snapshot-and-liquidity-leaderboard) above
+for the rate-limit evidence and the concurrency/interval strategy built
+around it.
+
+Phase 4 configuration (all optional, evidence-based defaults apply if
+unset — see `.env.example`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEXSCREENER_BULK_CONCURRENCY` | `2` | Max simultaneous Dexscreener requests during a snapshot build. |
+| `DEXSCREENER_REQUEST_INTERVAL_MS` | `1000` | Minimum spacing between request starts — the actual rate-limit enforcement. |
+| `MARKET_SNAPSHOT_TTL_MS` | `300000` (5 min) | How long a snapshot stays fresh before the next request triggers a rebuild. |
+
+All three validate strictly: unset uses the default, but a *present* value that isn't a positive integer throws immediately rather than silently falling back.
 
 ## Project scope
 
@@ -629,10 +846,24 @@ rate limiting.
   composition, and DEX composition above the existing pool table, with
   the executable-liquidity disclaimer always visible.
 
+**Implemented (Phase 4):**
+- Market-wide displayed-liquidity snapshot across all canonical assets,
+  built with bounded concurrency + rate-limited spacing (never
+  unconstrained `Promise.all`), reusing `buildAssetLiquidityProfile`
+  unchanged per asset.
+- Single-flight, TTL-based in-memory caching (`src/lib/cache/ttlCache.ts`)
+  — concurrent requests during a stale/missing cache share one refresh.
+- Explicit partial-failure handling: one broken asset never fails the
+  snapshot, is never reported as zero liquidity, and zero-pool assets
+  count as successes.
+- `GET /api/market/liquidity`.
+- The home page is now a real, searchable, sortable market leaderboard
+  with freshness metadata and a failures panel — no longer a
+  proof-of-consumption table.
+
 **Explicitly NOT implemented yet:**
-- Bulk liquidity fetching across all ~194 assets, a home-page
-  leaderboard, scheduled/background refresh, request caching, historical
-  snapshots.
+- Historical snapshots, scheduled/background refresh, a persistent job
+  queue.
 - Robinhood reference-price comparison, premium/discount, liquidity
   score, price-discrepancy alerts.
 - Executable liquidity, Uniswap V3/V4 quote simulation, routing,
@@ -642,72 +873,99 @@ rate limiting.
   deployment.
 
 These are intentionally out of scope per the project's incremental build
-plan; see [Phase 4 direction](#phase-4-direction-not-implemented) below.
+plan; see [Phase 5 direction](#phase-5-direction-not-implemented) below.
 
 ## Known limitations
 
-- **No caching layer.** Every call to `getRobinhoodAssets()`,
-  `getDexScreenerPoolsFor*()`, or `getAssetLiquidityProfileFor*()`
-  performs a fresh upstream fetch (Phase 3 does not add its own —
-  aggregation runs on whatever pools Phase 2 just fetched). Both
-  providers cache briefly server-side (Robinhood ~15s, Dexscreener's
-  response headers advertise `max-age=30`), so this is not incorrect,
-  just not optimized. Deliberately deferred across all three phases —
-  see [Phase 4 direction](#phase-4-direction-not-implemented), which is
-  exactly where a real caching/refresh strategy becomes necessary.
+- **Cache is cleared on restart.** The market snapshot cache
+  (`src/domain/market/cache.ts`) is an in-memory module-level singleton
+  — correct for the current single-instance architecture, but a process
+  restart or redeploy means the next request pays the full ~3.3-minute
+  cold-build cost again. There is no persistence layer to survive a
+  restart yet (see "Why no database yet" below).
+- **The single-flight cache is one instance, one process.** If this
+  application ever runs as multiple processes/instances without a shared
+  cache, each would build and hold its own snapshot independently —
+  fine for the current single-instance deployment target, not something
+  that scales horizontally as-is.
 - **Whole-response schema failure** at each provider's HTTP boundary
   means a single malformed record in an otherwise-valid response takes
-  down that entire fetch. Acceptable for the project's fail-closed
-  posture. Note this is *not* true of individual pool rejection within an
-  otherwise-valid Dexscreener response, nor of Phase 3 aggregation over
-  pools with partial data — both degrade gracefully (excluded pool /
-  `null` aggregate + incomplete coverage) rather than failing outright.
-- The asset page is still one-asset-at-a-time by design (see
-  [Project scope](#project-scope)) — no cross-asset ranking or comparison
-  exists yet.
+  down that entire fetch (for that one asset, in Phase 4's case — not
+  the whole snapshot, since it's caught and recorded as one entry in
+  `failures[]`). Acceptable for the project's fail-closed posture.
+- Phase 4's rate-limit ceiling (60 req/min) is a conservative assumption
+  applied to an endpoint with no published limit of its own — see
+  "Current provider rate limit" above. If Dexscreener's actual limit for
+  this endpoint is materially higher, snapshots build slower than
+  strictly necessary; if it's lower, this could still be too aggressive
+  (no live evidence of that so far — the live smoke test ran at ~59
+  req/min without any rate-limit response).
+- No retry logic exists for transient per-asset failures (timeout,
+  5xx, network) — a transient blip fails that one asset for this
+  snapshot cycle; it gets another chance on the next TTL-triggered
+  refresh. This was a deliberate choice, not an oversight (see
+  "Rate-limit failure behavior" — retries were optional for this phase
+  and were not added without evidence they're needed).
 - Pool rejection reasons (`PoolRejectionReason`) and Phase 3's
-  `symbolConflict` flag are computed and tested but have no dedicated UI
-  treatment beyond the `⚠` marker on conflicting quote-asset rows.
-- Phase 3's coverage tracking is per-metric (`liquidity`,
-  `volume{5m,1h,6h,24h}`, `txns{5m,1h,6h,24h}`) but not per
-  composition-group — a quote-asset or DEX row's `null` liquidity already
-  implies incomplete coverage for that group, but there's no separate
-  `QuoteAssetComposition.coverage` field spelling that out.
+  `symbolConflict` flag remain computed/tested but without dedicated UI
+  treatment beyond the `⚠`/`†` markers already in place.
 
 ## Unresolved risks
 
 - Both providers' schemas are undocumented beyond what was observed
   live; an upstream field-shape change surfaces as a
   `*SchemaValidationError` (fails closed, as intended) but there is
-  currently no alerting on that beyond the request failing.
+  currently no alerting on that beyond the request failing (or, in
+  Phase 4, that one asset landing in `failures[]`).
 - No live-network smoke test is included in the automated suite (by
-  design — core tests stay deterministic) — manual `curl` smoke tests
-  against `localhost:3000/api/assets/NVDA/{pools,liquidity}` were used to
-  confirm live-network behavior, and results were independently
-  cross-checked against a fresh raw Dexscreener fetch, but this is not
+  design — core tests stay deterministic). A full live bulk snapshot
+  (194/194 succeeded, ~196.8s, ~59.1 req/min effective rate — see the
+  Phase 4 completion report) and cross-checks against the direct
+  per-asset endpoint were run manually during development but are not
   enforced by CI.
-- Dexscreener's dual-length `pairAddress` behavior (20-byte address vs.
-  32-byte Uniswap v4 PoolId) was reverse-engineered from one asset's live
-  data (NVDA, 30 pools); it's possible other DEXes on Robinhood Chain use
-  a third identifier shape not yet observed.
+- Dexscreener's actual rate limit for `/token-pairs/v1` remains
+  unconfirmed by documentation — the 60/min design ceiling is
+  conservative, evidence-adjacent, not evidence-*proven*. A sustained
+  429 response would need to be observed to know the true limit; none
+  occurred during any live test in this project.
 - The activity-aggregation assumption (cross-pool summation reflects
-  independent per-pool activity, not provider-side duplication) is based
-  on inspecting one asset's 30 live pools finding no duplicate
-  `volume.h24` values — documented as an explicit assumption, not a
-  provider guarantee (see "Activity aggregation" above); it should be
-  revisited if a future asset's data contradicts it.
+  independent per-pool activity, not provider-side duplication) remains
+  based on inspecting one asset's pools at a time — Phase 4's full
+  194-asset run didn't contradict it, but that's still consistent
+  evidence, not proof, across every asset's every pool.
 
-## Phase 4 direction (not implemented)
+## Why no database yet
 
-**Bulk market snapshot + liquidity leaderboard**: fetch all canonical
-Robinhood assets' liquidity profiles to power a home-page leaderboard.
-This needs deliberate design Phase 3 deferred: Dexscreener's 60
-req/min limit across ~194 assets, bounded concurrency, per-asset partial
-failure handling (one asset's provider error shouldn't blank the whole
-leaderboard), request caching with defined freshness/staleness
-semantics, and a refresh strategy that avoids 194 sequential requests on
-every page load. Phase 3's `buildAssetLiquidityProfile(asset, pools)` is already a pure
-function decoupled from fetching, so this is a matter of orchestration
-(fetch many assets' pools, call the same aggregation function per asset)
-rather than new aggregation logic — the per-asset math doesn't change,
-only how many assets get fetched and how often.
+Phase 4 introduces real caching for the first time, which is exactly the
+kind of feature that invites "just add Postgres" — deliberately not
+done. A `MarketLiquiditySnapshot` is disposable, cheaply rebuildable
+current-state data, not a record anything else depends on existing
+historically. An in-memory single-value cache is simpler, has zero
+operational surface (no connection pool, no migrations, no schema), and
+correctly matches what's actually needed: "don't rebuild this for every
+request," not "remember this forever." Historical persistence is a
+different, real future need (Phase 5+ territory) — it shouldn't be
+backed into this phase's cache just because a database would also incur.
+
+## Phase 5 direction (not implemented)
+
+Two candidate directions were identified; **Robinhood reference-price
+comparison is the recommended next phase** — it adds another immediately
+useful market-quality dimension (DEX price vs. Robinhood's own reference
+price, premium/discount) with substantially less protocol complexity
+than the alternative:
+
+**A. Robinhood reference price + premium/discount** (recommended):
+fetch Robinhood's reference price per asset (`GET
+/rhj/prices/{symbol}`, not yet integrated), compare against each pool's
+`priceUsd`/the asset's volume-weighted DEX price, and surface
+premium/discount on both the per-asset page and the leaderboard.
+
+**B. Executable liquidity engine**: on-chain quoting/simulation
+(Uniswap V3/V4) to determine actual swap capacity before a given
+price-impact threshold — the "displayed vs. executable" distinction this
+project has maintained since Phase 3 finally gets its executable half.
+Substantially more protocol complexity (pool-type-specific quoting,
+routing across concentrated-liquidity ranges) than option A.
+
+Do not implement either yet.
