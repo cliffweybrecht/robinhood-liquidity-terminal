@@ -244,9 +244,10 @@ Each call performs a fresh upstream fetch — see
 Phase 2 answers a second, narrower question, always starting from a
 Phase 1 canonical address: **"what Dexscreener liquidity pools currently
 exist for this exact canonical Robinhood Stock Token contract?"** It does
-**not** aggregate liquidity across pools, compare against Robinhood's
-reference price, or attempt executable liquidity — those remain later
-phases (see [Phase 3 direction](#phase-3-direction-not-implemented)).
+**not** aggregate liquidity across pools (that's
+[Phase 3](#phase-3-displayed-liquidity-aggregation-and-fragmentation-analysis)),
+compare against Robinhood's reference price, or attempt executable
+liquidity — those remain later phases.
 
 ### How pool discovery works
 
@@ -384,6 +385,199 @@ reuse/testability) — it is intentionally *not* exported from the public
 domain API surface as a way to look up pools; only the canonical-gated
 functions above are.
 
+## Phase 3: Displayed Liquidity Aggregation and Fragmentation Analysis
+
+Phase 3 answers a third question, built entirely on Phase 2's already
+canonical-validated, deduplicated pools: **"what does the displayed DEX
+liquidity structure of this exact canonical Robinhood Stock Token look
+like across all its accepted pools?"** — total displayed liquidity, USDG
+liquidity, concentration, and quote-asset/DEX composition.
+
+### Displayed liquidity vs. executable liquidity
+
+**This is provider-reported market data, not a statement of what can
+actually be bought.** A Dexscreener pool reporting `liquidity.usd =
+1,000,000` does not mean a user can buy $500,000 of the stock token at
+acceptable price impact — concentrated-liquidity AMMs can have that
+liquidity positioned outside the immediately tradeable price range.
+Determining actual swap capacity requires on-chain quoting/simulation,
+which is explicitly **not** implemented yet (see
+[Phase 4 direction](#phase-4-direction-not-implemented)).
+
+To keep this distinction impossible to miss, the codebase and UI never
+use terms like "buy capacity," "executable depth," "available to buy,"
+"maximum purchasable," or "order capacity" for Phase 3 metrics — only
+"displayed liquidity." The UI additionally carries a standing note:
+*"Displayed liquidity is provider-reported pool liquidity and does not
+represent executable buy capacity."*
+
+### Null vs. zero handling
+
+The single rule underlying every aggregate in this phase: **a metric is
+`null` when zero pools report a non-null value for it, and is the sum of
+whatever pools *did* report otherwise — including when that sum is
+itself `0`.** A pool reporting `liquidityUsd: 0` contributes a real `0`;
+a pool reporting `liquidityUsd: null` contributes nothing and is counted
+as missing, never treated as `0`. This one function
+(`sumNullable` in `src/domain/liquidity/aggregate.ts`) implements the
+rule once and is reused for every liquidity, volume, and buy/sell
+aggregate — displayed liquidity, USDG liquidity, each quote-asset/DEX
+group's liquidity, and all eight activity metrics.
+
+### Coverage/completeness semantics
+
+`coverage.liquidity` and `coverage.activity.*` report, per metric,
+`{ poolsReporting, poolsMissing, complete }` — `complete` is
+`poolsMissing === 0`, vacuously `true` for a zero-pool asset (nothing is
+missing from nothing). This is what makes the four states the aggregation
+rules call for distinguishable from the response alone: zero accepted
+pools (`poolCount: 0`, coverage `{0, 0, true}`), accepted pools but no
+data (coverage `{0, N, false}`, aggregate `null`), partial data (coverage
+`{n, m, false}`, aggregate is the partial sum), and full data (coverage
+`{N, 0, true}`).
+
+### USDG identification by exact contract address
+
+Robinhood Chain's canonical USDG (`CANONICAL_USDG_ADDRESS` in
+`src/domain/liquidity/aggregate.ts`,
+`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`) is matched
+case-insensitively against a pool's **non-canonical-asset side** — i.e.
+`quoteToken` when `canonicalAssetSide === "base"`, `baseToken` otherwise,
+using that field rather than re-deriving which side is which (see
+Phase 2's identity rules — same discipline applies here). A token merely
+*labeled* `"USDG"` on a different contract address never counts, exactly
+as a token labeled with the canonical stock ticker on the wrong contract
+never counts in Phase 1/2.
+
+### Quote-asset composition
+
+Each pool's non-canonical-asset side (via `canonicalAssetSide`, never
+inferred by ticker) is grouped by **exact contract address**
+(case-insensitive). Live NVDA data actually includes three distinct
+quote assets by address: canonical USDG, canonical WETH, and the
+zero address (`0x000...000`, the conventional placeholder Dexscreener
+uses for native ETH — a genuinely different identity from WETH's ERC-20
+contract, which is exactly why address-based grouping matters here and
+not just for USDG).
+
+If pools sharing an address disagree on the token's symbol beyond
+case/whitespace, that is surfaced via `symbolConflict: true` rather than
+silently resolved — the group's `symbol` field is a deterministic
+representative (the lexicographically smallest distinct raw symbol
+observed, independent of pool array order), not a guess.
+
+### DEX composition
+
+Aggregated by exact `dexId` string. Live data across NVDA's 30 pools
+(8 distinct DEXes: `uniswap`, `ramses`, `alandale`, `up`, `giga`,
+`sheriff`, `pancakeswap`, `robinswap`) showed **no casing variance** —
+`dexId` is consistently lowercase — so no normalization is applied;
+`dexId` is grouped and displayed exactly as Dexscreener reports it.
+
+### Concentration formulas
+
+Pools with non-null `liquidityUsd`, sorted descending (ties broken by
+`pairAddress` ascending for determinism), give:
+
+```
+topNPct = sum(top N pools' liquidityUsd) / total(non-null liquidityUsd) * 100
+```
+
+`N` exceeding the number of ranked pools sums whatever exists (e.g. 2
+pools → `top3Pct` and `top5Pct` both equal `top2Pct`, effectively 100%).
+When total displayed liquidity is not strictly positive — no pool
+reports liquidity, or the reporting pools sum to exactly `0` — every
+`topNPct` (and `largestPool.shareOfDisplayedLiquidityPct`, and every
+composition row's `shareOfDisplayedLiquidityPct`) is `null`. This
+formula never produces `NaN` or `Infinity`. `largestPool` itself is
+`null` only when *no* pool reports `liquidityUsd` — a pool reporting
+exactly `0` can still be "largest" (with a `null` share, since the
+total is `0`).
+
+### Activity aggregation: an explicit assumption
+
+Dexscreener's docs don't state whether a pair record's `volume`/`txns`
+are pool-specific or already aggregated across venues. Live inspection
+of NVDA's 30 pools found no duplicate `volume.h24` values and plausible,
+widely-varying per-pool magnitudes correlating with each pool's own
+liquidity size — consistent with each record being that **specific
+pool's own** trading activity, not a shared/duplicated figure. Because
+Phase 2 already deduplicates by unique pool identity
+(`chainId` + `pairAddress`), Phase 3 sums activity across the accepted,
+deduplicated pool set. **This is documented as observed cross-pool
+activity, not an exchange-grade consolidated tape** — if a future
+Dexscreener response ever demonstrates duplicated activity reporting
+across records for the same economic pool, this assumption will need
+revisiting.
+
+### Numeric precision
+
+All Phase 3 arithmetic uses plain JavaScript `number`. Live NVDA totals
+(~$4.5M displayed liquidity, ~$7.8M 24h volume) are many orders of
+magnitude below `Number.MAX_SAFE_INTEGER`, and this is provider-reported
+approximate market data, not settlement accounting — a big-decimal
+library would add complexity with no evidence it's needed. (This does
+not apply to future on-chain token-accounting phases, which must not use
+floating-point.)
+
+### Deterministic sorting
+
+`quoteAssets` and `dexes` both sort by `displayedLiquidityUsd`
+descending, entries with `null` sorting after every non-null entry, tied
+entries broken ascending by `address`/`dexId` respectively. `pools`
+preserves Phase 2's existing order. `largestPool` ties break by
+`pairAddress` ascending. None of this relies on provider response
+ordering for anything meaningful.
+
+### API
+
+#### `GET /api/assets/{symbol}/liquidity`
+
+Returns `{ data: AssetLiquidityProfile }` — see
+`src/domain/liquidity/types.ts` for the full shape (asset identity,
+`displayedLiquidityUsd`, `usdGLiquidityUsd`, `poolCount`, `dexCount`,
+`largestPool`, `concentration`, `quoteAssets`, `dexes`, `activity`,
+`coverage`, and the full `pools` array — pool-level detail is always
+preserved alongside the aggregates, never replaced by them). Errors:
+`404` unknown symbol, `409` ambiguous symbol, `502`/`504` Dexscreener
+provider failures, `500` integrity conflicts
+(`DuplicatePoolConflictError`) or unexpected errors — identical mapping
+to `/pools`, since this route's failure modes are a superset of that
+one's.
+
+#### Programmatic API (`src/domain/liquidity`)
+
+```ts
+import {
+  buildAssetLiquidityProfile,
+  getAssetLiquidityProfileBySymbol,
+  getAssetLiquidityProfileByAddress,
+} from "@/domain/liquidity";
+
+const profile = await getAssetLiquidityProfileBySymbol("nvda");
+```
+
+`buildAssetLiquidityProfile(asset, pools)` is a pure, synchronous
+function — no provider calls — consuming Phase 2's `readonly
+LiquidityPool[]` directly, which is what makes the aggregation logic
+exhaustively unit-testable without any network mocking. The
+symbol/address service functions preserve the full trust chain
+(`symbol/address → canonical asset → validated pools → aggregation`,
+mirroring Phase 2's guarantee) — there is intentionally no public
+function that aggregates an arbitrary, unverified token address as if it
+were a canonical Robinhood asset.
+
+### UI
+
+`/assets/{symbol}` now shows summary stat cards (displayed liquidity,
+USDG displayed liquidity, observed 24h volume, pool/DEX count, largest
+pool + share, top-3/top-5 concentration, 24h buys/sells) above
+quote-asset and DEX composition tables, above the existing pool table —
+all using the "displayed liquidity" terminology above, with the
+executable-liquidity disclaimer always visible. No home-page leaderboard
+yet (see [Project scope](#project-scope) below) — this remains
+one-asset-at-a-time.
+
 ## Running the application
 
 ```bash
@@ -399,13 +593,14 @@ npm run lint      # eslint
 npm run build     # next build (production build)
 ```
 
-No API keys or secrets are required for either phase — both `/rhj/assets`
+No API keys or secrets are required for any phase — both `/rhj/assets`
 and Dexscreener's `/token-pairs/v1` are public, unauthenticated
 endpoints. Dexscreener documents a 60 requests/minute limit on this
-endpoint; Phase 2 makes exactly one Dexscreener request per pool
-discovery call (one asset at a time, only when a user visits its page or
-calls its API route — no bulk/background fetching), which stays well
-under that limit without any additional client-side rate limiting.
+endpoint; both Phase 2 and Phase 3 make exactly one Dexscreener request
+per asset lookup (one asset at a time, only when a user visits its page
+or calls its API route — no bulk/background fetching, no leaderboard),
+which stays well under that limit without any additional client-side
+rate limiting.
 
 ## Project scope
 
@@ -420,45 +615,64 @@ under that limit without any additional client-side rate limiting.
 - `GET /api/assets/{symbol}/pools`.
 - `getDexScreenerPoolsForAsset/BySymbol/ByAddress` domain API, gated on
   Phase 1 canonical resolution.
-- `/assets/{symbol}` page showing the normalized pool list (DEX, pair,
-  addresses, liquidity, volume, buys/sells, Dexscreener link).
+
+**Implemented (Phase 3):**
+- Displayed-liquidity aggregation for one canonical asset at a time:
+  total and USDG-specific displayed liquidity, pool/DEX counts,
+  concentration (top-1/3/5), largest pool, quote-asset/DEX composition,
+  observed cross-pool activity — all with explicit null-vs-zero and
+  coverage/completeness semantics.
+- `GET /api/assets/{symbol}/liquidity`.
+- `buildAssetLiquidityProfile`/`getAssetLiquidityProfileBySymbol/ByAddress`
+  domain API, gated on the same Phase 1 → Phase 2 trust chain.
+- `/assets/{symbol}` page now shows summary stat cards, quote-asset
+  composition, and DEX composition above the existing pool table, with
+  the executable-liquidity disclaimer always visible.
 
 **Explicitly NOT implemented yet:**
-- Liquidity aggregation across pools (total, USDG-specific, or
-  cross-pool volume), ranking/leaderboard, liquidity score.
-- Robinhood reference-price comparison, premium/discount.
-- Executable liquidity, Uniswap V3/V4 quoting, routing, order simulator.
-- Historical data, PostgreSQL/Drizzle persistence, Redis, background
-  workers, charts, alerts, wallet connection, trading, authentication,
-  production deployment.
+- Bulk liquidity fetching across all ~194 assets, a home-page
+  leaderboard, scheduled/background refresh, request caching, historical
+  snapshots.
+- Robinhood reference-price comparison, premium/discount, liquidity
+  score, price-discrepancy alerts.
+- Executable liquidity, Uniswap V3/V4 quote simulation, routing,
+  price-impact curves, order simulator.
+- PostgreSQL/Drizzle persistence, Redis, background workers, wallet
+  connection, trading, transaction signing, authentication, production
+  deployment.
 
 These are intentionally out of scope per the project's incremental build
-plan; see [Phase 3 direction](#phase-3-direction-not-implemented) below.
+plan; see [Phase 4 direction](#phase-4-direction-not-implemented) below.
 
 ## Known limitations
 
-- **No caching layer.** Every call to `getRobinhoodAssets()` or
-  `getDexScreenerPoolsFor*()` performs a fresh upstream fetch. Both
+- **No caching layer.** Every call to `getRobinhoodAssets()`,
+  `getDexScreenerPoolsFor*()`, or `getAssetLiquidityProfileFor*()`
+  performs a fresh upstream fetch (Phase 3 does not add its own —
+  aggregation runs on whatever pools Phase 2 just fetched). Both
   providers cache briefly server-side (Robinhood ~15s, Dexscreener's
   response headers advertise `max-age=30`), so this is not incorrect,
-  just not optimized. Deliberately deferred for both phases — introducing
-  caching prematurely would add complexity (invalidation, staleness
-  policy, and now two providers) before there's a proven need.
+  just not optimized. Deliberately deferred across all three phases —
+  see [Phase 4 direction](#phase-4-direction-not-implemented), which is
+  exactly where a real caching/refresh strategy becomes necessary.
 - **Whole-response schema failure** at each provider's HTTP boundary
-  (see above) means a single malformed record in an otherwise-valid
-  response takes down that entire fetch. Acceptable for the project's
-  fail-closed posture; may need refinement if upstream data quality
-  turns out to be inconsistent. Note this is *not* true of individual
-  pool rejection within an otherwise-valid Dexscreener response — a
-  malformed or non-participating pool is excluded, not a batch failure
-  (see [Zero pools vs. provider failure](#zero-pools-vs-provider-failure)).
-- The asset-pools page is a minimal proof of consumption (DEX, pair,
-  liquidity, volume, buys/sells, link) — not the liquidity leaderboard or
-  aggregate metrics described in the product vision.
-- Pool rejection reasons (`PoolRejectionReason` — wrong chain, invalid
-  address, doesn't contain canonical asset, etc.) are computed and
-  tested but not currently surfaced through the HTTP API or UI, only
-  used internally to decide inclusion/exclusion.
+  means a single malformed record in an otherwise-valid response takes
+  down that entire fetch. Acceptable for the project's fail-closed
+  posture. Note this is *not* true of individual pool rejection within an
+  otherwise-valid Dexscreener response, nor of Phase 3 aggregation over
+  pools with partial data — both degrade gracefully (excluded pool /
+  `null` aggregate + incomplete coverage) rather than failing outright.
+- The asset page is still one-asset-at-a-time by design (see
+  [Project scope](#project-scope)) — no cross-asset ranking or comparison
+  exists yet.
+- Pool rejection reasons (`PoolRejectionReason`) and Phase 3's
+  `symbolConflict` flag are computed and tested but have no dedicated UI
+  treatment beyond the `⚠` marker on conflicting quote-asset rows.
+- Phase 3's coverage tracking is per-metric (`liquidity`,
+  `volume{5m,1h,6h,24h}`, `txns{5m,1h,6h,24h}`) but not per
+  composition-group — a quote-asset or DEX row's `null` liquidity already
+  implies incomplete coverage for that group, but there's no separate
+  `QuoteAssetComposition.coverage` field spelling that out.
 
 ## Unresolved risks
 
@@ -468,22 +682,32 @@ plan; see [Phase 3 direction](#phase-3-direction-not-implemented) below.
   currently no alerting on that beyond the request failing.
 - No live-network smoke test is included in the automated suite (by
   design — core tests stay deterministic) — manual `curl` smoke tests
-  against `localhost:3000/api/assets` and
-  `localhost:3000/api/assets/NVDA/pools` were used to confirm
-  live-network behavior during development but are not enforced by CI.
+  against `localhost:3000/api/assets/NVDA/{pools,liquidity}` were used to
+  confirm live-network behavior, and results were independently
+  cross-checked against a fresh raw Dexscreener fetch, but this is not
+  enforced by CI.
 - Dexscreener's dual-length `pairAddress` behavior (20-byte address vs.
   32-byte Uniswap v4 PoolId) was reverse-engineered from one asset's live
   data (NVDA, 30 pools); it's possible other DEXes on Robinhood Chain use
-  a third identifier shape not yet observed, which would surface as
-  `INVALID_PAIR_ADDRESS` rejections rather than a crash.
+  a third identifier shape not yet observed.
+- The activity-aggregation assumption (cross-pool summation reflects
+  independent per-pool activity, not provider-side duplication) is based
+  on inspecting one asset's 30 live pools finding no duplicate
+  `volume.h24` values — documented as an explicit assumption, not a
+  provider guarantee (see "Activity aggregation" above); it should be
+  revisited if a future asset's data contradicts it.
 
-## Phase 3 direction (not implemented)
+## Phase 4 direction (not implemented)
 
-**Displayed liquidity aggregation across pools**: sum `liquidityUsd`
-across a canonical asset's accepted pools (and separately, USDG-quoted
-liquidity specifically), aggregate 5m/1h/6h/24h volume and buy/sell
-counts, and identify the single largest pool/DEX by liquidity — while
-still preserving pool-level detail (never collapsing the pool list into
-just a total). This is explicitly *displayed* liquidity aggregation, not
-executable liquidity — the distinction from on-chain quoting/simulation
-remains a later phase after that.
+**Bulk market snapshot + liquidity leaderboard**: fetch all canonical
+Robinhood assets' liquidity profiles to power a home-page leaderboard.
+This needs deliberate design Phase 3 deferred: Dexscreener's 60
+req/min limit across ~194 assets, bounded concurrency, per-asset partial
+failure handling (one asset's provider error shouldn't blank the whole
+leaderboard), request caching with defined freshness/staleness
+semantics, and a refresh strategy that avoids 194 sequential requests on
+every page load. Phase 3's `buildAssetLiquidityProfile(asset, pools)` is already a pure
+function decoupled from fetching, so this is a matter of orchestration
+(fetch many assets' pools, call the same aggregation function per asset)
+rather than new aggregation logic — the per-asset math doesn't change,
+only how many assets get fetched and how often.
