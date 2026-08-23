@@ -1,0 +1,20 @@
+{
+  "quotes": [
+    {
+      "tokenSymbol": "NVDA",
+      "deployments": [
+        { "contractAddress": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC", "chainId": 4663 }
+      ],
+      "bid": "213",
+      "ask": "217.55",
+      "currency": "USD",
+      "dailyTradingVolume": "98868946",
+      "isTradingHalt": false,
+      "generatedAt": "2026-08-22T19:15:25.104646145Z",
+      "dailyHigh": "218.74",
+      "dailyLow": "213.02",
+      "mintBurnTokenVolume": "500",
+      "mintBurnUsdVolume": "107637.5"
+    }
+  ]
+}

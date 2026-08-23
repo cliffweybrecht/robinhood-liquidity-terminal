@@ -7,6 +7,11 @@ import type { MarketLiquidityRow } from "./types";
  * re-derivation of any metric. `logoUrl` comes from the Phase 1
  * canonical asset record (not part of `AssetLiquidityProfile.asset`,
  * which intentionally only carries symbol/name/contractAddress).
+ *
+ * Price fields (Phase 5) default to `null` here — this function has no
+ * involvement with Robinhood price data at all. `snapshot.ts` fills
+ * them in afterward, per-row, only when the bulk price fetch succeeded
+ * and matched this asset's symbol — see `MarketPriceMeta`.
  */
 export function projectLiquidityProfileToMarketRow(
   profile: AssetLiquidityProfile,
@@ -32,6 +37,12 @@ export function projectLiquidityProfileToMarketRow(
     top5ConcentrationPct: profile.concentration.top5Pct,
     liquidityCoverageComplete: profile.coverage.liquidity.complete,
     volume24hCoverageComplete: profile.coverage.activity.volume24h.complete,
+    robinhoodReferencePriceUsd: null,
+    dexLiquidityWeightedPriceUsd: null,
+    dexMedianPriceUsd: null,
+    premiumDiscountPct: null,
+    priceDispersionPct: null,
+    priceCoverageComplete: null,
   };
 }
 

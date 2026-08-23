@@ -20,6 +20,12 @@ function row(overrides: Partial<MarketLiquidityRow> = {}): MarketLiquidityRow {
     top5ConcentrationPct: 100,
     liquidityCoverageComplete: true,
     volume24hCoverageComplete: true,
+    robinhoodReferencePriceUsd: null,
+    dexLiquidityWeightedPriceUsd: null,
+    dexMedianPriceUsd: null,
+    premiumDiscountPct: null,
+    priceDispersionPct: null,
+    priceCoverageComplete: null,
     ...overrides,
   };
 }

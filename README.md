@@ -784,6 +784,450 @@ The API's own default row order (`sortMarketRows` in
 last, symbol ascending tie-break) is just the initial client state —
 the UI re-sorts client-side from there.
 
+## Phase 5: Robinhood Reference Price + DEX Price Comparison
+
+Phase 5 adds a second, independent market-quality dimension: **price
+dislocation**, not liquidity depth. It answers "how does this asset's
+on-chain DEX price compare with Robinhood's own reference price for the
+same underlying equity?" It is explicitly **not** executable
+liquidity/slippage/price-impact — see "Out of scope" below.
+
+### DEX price semantics — verified live, not assumed
+
+Dexscreener's `priceUsd` is always the **base token's** USD price; there
+is no separate "quote-side" price field. Two situations occur depending
+on `LiquidityPool.canonicalAssetSide` (Phase 2's field — the only
+legitimate basis for this decision, never inferred from symbol/name):
+
+- **`canonicalAssetSide: "base"`** — the canonical Robinhood token is
+  the pool's base token, so `priceUsd` already *is* the canonical
+  asset's price. Used directly.
+- **`canonicalAssetSide: "quote"`** — the canonical token is the quote
+  token instead (a decoy/imitation token, e.g. "Apple Cat" `AAPLCAT`, is
+  the base). The canonical price is derived as
+  `priceUsd / priceNative`, since `priceNative` is the base token's
+  price *in units of the quote token* — dividing the base's USD price by
+  that ratio yields the quote (canonical) token's own USD price.
+
+**Live proof, reproduced during Phase 5 verification** (see "Live smoke
+test results" below for the full run): AAPL pool
+`0x719a752f...ba74061c5b6` (`AAPLCAT`/`AAPL`, `canonicalAssetSide:
+"quote"`) reported raw `priceUsd: "0.00004943"`,
+`priceNative: "0.0000001625"` directly from Dexscreener's API. `0.00004943
+/ 0.0000001625 = 304.18461538461536`, matching this system's derived
+`canonicalAssetPriceUsd: 304.18461538461537` to full floating-point
+precision. The formula was proved against a live pool, not assumed from
+documentation.
+
+### Robinhood reference price semantics — verified live, not assumed
+
+`GET /rhj/prices/{symbol}` (and, undocumented but live-confirmed, `GET
+/rhj/prices` with no symbol — see "Bulk endpoint discovery" below)
+returns a `bid`/`ask` pair, not a single price:
+
+```json
+{
+  "quotes": [
+    {
+      "tokenSymbol": "NVDA",
+      "bid": "213.00",
+      "ask": "217.55",
+      "currency": "USD",
+      "isTradingHalt": false,
+      "generatedAt": "2026-08-22T19:47:38.042029192Z",
+      "...": "dailyHigh/dailyLow/dailyTradingVolume/mintBurn*/deployments — observed but not used downstream"
+    }
+  ]
+}
+```
+
+This system synthesizes a single reference number as
+`rawUnderlyingMidUsd = (bid + ask) / 2` — a documented choice (mid of
+the spread), not Robinhood's own "the price." **`bid`/`ask` are the raw
+underlying-equity quote, not multiplier-adjusted** — converting to a
+token-equivalent price requires `referencePriceUsd = rawUnderlyingMidUsd
+* Number(asset.currentMultiplier)`, using Phase 1's already-fetched
+`currentMultiplier` string.
+
+**Live evidence that the multiplier must be applied:** CRWD's canonical
+asset carries `currentMultiplier: "4.000000000000000000"` (a documented
+4-for-1 forward-split adjustment). Its live quote (`bid: "191.01", ask:
+"191.8"`) has a raw mid of ~191.4 — implausible against CRWD's real
+market price, which is in the ~$750-800 range. `191.4 × 4 ≈ 765.6`,
+consistent with the real price. Most other assets carry
+`currentMultiplier: "1.000000000000000000"` (a no-op), which is why a
+naive spot-check against one of those (e.g. SGOV) looks "correct" even
+without applying the multiplier — CRWD's split is the decisive case,
+not an average across assets that mostly don't exercise this field.
+AAPL's live multiplier (`"1.000566080061092436"`, see the smoke-test
+results below) is a further live confirmation that this field is
+real-valued and asset-specific, not always exactly `1`.
+
+### Reference price lookups always use the canonical symbol
+
+`getAssetPriceComparisonForAsset`/`ByAddress` resolve through Phase 1's
+canonical registry first and pass `asset.symbol` — never a
+Dexscreener-reported token label — into
+`fetchRobinhoodPriceForSymbol`/`fetchAllRobinhoodPrices`. The full
+Phase 1 → Phase 2 trust chain (contract-address validation, chain-ID
+check, ambiguous-symbol rejection) gates every price lookup exactly as
+it gates every liquidity lookup.
+
+### Provider layer (`src/providers/robinhood-price/`)
+
+A dedicated provider, not merged into `src/providers/robinhood/`
+(Phase 1's asset-registry provider) — different endpoint, different
+response shape, different schema. `schema.ts` defines
+`robinhoodPriceQuoteSchema`/`robinhoodPricesResponseSchema` (numeric
+fields are validated as decimal *strings*, matching the live shape, not
+coerced to numbers at the schema boundary). `client.ts` exposes
+`fetchRobinhoodPriceForSymbol(symbol)` (`GET /rhj/prices/{symbol}`) and
+`fetchAllRobinhoodPrices()` (`GET /rhj/prices`, no symbol — the bulk
+form). Both deliberately reuse `ROBINHOOD_API_BASE_URL`/
+`ROBINHOOD_API_TIMEOUT_MS` rather than introducing duplicate env vars,
+since `/rhj/prices` is the same host as `/rhj/assets` with comparable
+latency. `errors.ts` mirrors the existing provider error hierarchy
+exactly (`RobinhoodPriceNetworkError`/`TimeoutError`/`HttpError`/
+`InvalidJsonError`/`SchemaValidationError`).
+
+### Domain layer (`src/domain/price/`)
+
+Also dedicated, not merged into `src/domain/liquidity`. Pure functions,
+fully unit-tested with zero live network calls:
+
+- **`deriveCanonicalAssetPriceUsd(pool)`** — the orientation-aware
+  formula above, returning `{ priceUsd, derivation }` where
+  `derivation` is `CANONICAL_AS_BASE` / `CANONICAL_AS_QUOTE_DERIVED` /
+  `UNAVAILABLE` (never silently coerced to `0` when a price can't be
+  derived — e.g. `priceNative <= 0` or missing fields).
+- **`buildDexPriceSummary(pools)`** — computes **three** independent DEX
+  price methodologies, never just one:
+  - `largestPoolPriceUsd` — price from the single usable-price pool with
+    the greatest liquidity (deterministic pairAddress tie-break).
+  - `liquidityWeightedPriceUsd` — `Σ(price·liquidity) / Σ(liquidity)`
+    over pools with a usable price **and** `liquidityUsd > 0`.
+  - `medianPriceUsd` — median of every usable per-pool price.
+
+  Plus outlier-awareness diagnostics that are never used to silently
+  discard data: `minPriceUsd`/`maxPriceUsd`, `priceDispersionPct`
+  (`(max − min) / median × 100`, only when `median > 0`),
+  `usablePricePoolCount`/`totalPoolCount`/`weightedPricePoolCount`, and
+  `priceCoverage`/`weightedPriceCoverage` (reusing Phase 3's `Coverage`
+  shape). Every pool — usable or not — remains visible in `pools[]`.
+- **`calculatePremiumDiscountPct(dexPriceUsd, referencePriceUsd)`** —
+  `(dexPriceUsd − referencePriceUsd) / referencePriceUsd × 100`, `null`
+  (never `NaN`/`Infinity`) whenever `dexPriceUsd` is `null` or
+  `referencePriceUsd` is not strictly positive.
+- **`buildAssetPriceComparison(asset, pools, robinhoodPrice)`** —
+  assembles the full comparison, computing premium/discount for **all
+  three** DEX methodologies against the same reference price, never
+  just one.
+
+### Coverage/outlier diagnostics, exercised live
+
+AAPL's live smoke-test run (below) surfaced a genuine dirty-data pool:
+one AAPL pool reported `canonicalAssetPriceUsd: 5.364e-24` (`liquidityUsd:
+null`). This is exactly the case the design anticipated — it is
+**excluded** from `liquidityWeightedPriceUsd`
+(`weightedPricePoolCount: 29` of `30` usable pools) because it has no
+liquidity to weight by, but it is **not deleted**: it remains in
+`pools[]`, and it correctly widens `priceDispersionPct` to ~104% for
+that asset, visibly flagging that AAPL's DEX price picture includes an
+extreme outlier rather than hiding it behind a single clean-looking
+number.
+
+### Terminology and visual semantics
+
+Robinhood's value is always labeled **"Robinhood Reference"** — never
+"True Price" or "Fair Value." The computed difference is always
+**"Premium"/"Discount"** — never "arbitrage," "opportunity," or
+"mispricing." Both providers' own timestamps are preserved and shown
+separately (`robinhood.generatedAt`, this comparison's own
+`generatedAt`) — the UI never implies the two prices were observed at
+the same instant.
+
+### Public service API (`src/domain/price/service.ts`)
+
+- **`getAssetPriceComparisonForAsset(asset, pools, options)`** — the
+  core operation: an already-resolved canonical asset plus an
+  already-fetched pool list. The per-asset UI page uses this directly,
+  reusing the pools it already fetched for the Phase 3 liquidity
+  profile rather than issuing a second Dexscreener round-trip for the
+  same asset — a deliberate, documented tradeoff (one extra cheap,
+  non-rate-limited Robinhood registry call instead).
+- **`getAssetPriceComparisonBySymbol(symbol, options)`** /
+  **`getAssetPriceComparisonByAddress(address, options)`** — resolve
+  through Phase 1 → Phase 2 first, then call the core function above.
+  Inherit `AssetNotFoundError`/`AmbiguousSymbolError` unchanged; throw
+  `RobinhoodReferencePriceNotFoundError` if the resolved canonical
+  symbol is absent from Robinhood's price response (a genuine upstream
+  data inconsistency between Robinhood's own asset and price
+  registries, not a client error).
+
+### API
+
+#### `GET /api/assets/{symbol}/price`
+
+```json
+{
+  "data": {
+    "asset": { "symbol": "NVDA", "name": "NVIDIA • Robinhood Token", "contractAddress": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" },
+    "robinhood": {
+      "rawUnderlyingBidUsd": 213, "rawUnderlyingAskUsd": 217.55, "rawUnderlyingMidUsd": 215.275,
+      "currentMultiplier": "1.000000000000000000", "referencePriceUsd": 215.275,
+      "currency": "USD", "isTradingHalt": false,
+      "generatedAt": "2026-08-22T19:47:38.042029192Z", "source": "robinhood"
+    },
+    "dex": {
+      "largestPoolPriceUsd": 216.16, "liquidityWeightedPriceUsd": 216.02637823572405, "medianPriceUsd": 216.077,
+      "minPriceUsd": 215.055, "maxPriceUsd": 225.59, "priceDispersionPct": 4.875576761987623,
+      "usablePricePoolCount": 30, "totalPoolCount": 30, "weightedPricePoolCount": 30,
+      "priceCoverage": { "poolsReporting": 30, "poolsMissing": 0, "complete": true },
+      "weightedPriceCoverage": { "poolsReporting": 30, "poolsMissing": 0, "complete": true },
+      "pools": [ "..." ]
+    },
+    "comparison": {
+      "largestPoolPremiumDiscountPct": 0.4111020787364956,
+      "liquidityWeightedPremiumDiscountPct": 0.34903181313392045,
+      "medianPremiumDiscountPct": 0.3725467425386099
+    },
+    "generatedAt": "2026-08-22T19:47:43.140Z"
+  }
+}
+```
+
+Errors follow the same mapping pattern as the other per-asset routes,
+extended with `RobinhoodPriceProviderError` (502/504) and
+`PriceComparisonError` (502) branches. A genuine "no usable DEX price"
+result is a normal `200` with `null` aggregates — not an error.
+
+### Per-asset UI
+
+The `/assets/{symbol}` page adds a "Price" section below the existing
+liquidity stat cards: Robinhood Reference (with its bid/ask/multiplier
+composition, or "Trading halted"), DEX Liquidity-Weighted, DEX
+Premium/Discount, DEX Price Range (min–max with a dispersion sub-label),
+Largest-Pool Price, Largest-Pool Premium/Discount, DEX Median, Median
+Premium/Discount, and Price Coverage. A methodology disclosure sentence
+is always visible: *"DEX price is derived from validated pools.
+Premium/discount compares that observed DEX price with Robinhood's
+reference price; data sources may be observed at different times."* A
+price-fetch failure renders its own inline error and never blanks the
+liquidity section above it — the two are fetched and rendered
+independently.
+
+### Bulk endpoint discovery — a real simplification vs. the anticipated design
+
+The Phase 5 spec anticipated needing new rate-limiting infrastructure
+for ~194 individual `/rhj/prices/{symbol}` calls (mirroring Phase 4's
+Dexscreener limiter). Live investigation found this unnecessary:
+`GET /rhj/prices` with **no** symbol suffix is undocumented but returns
+**all 194 quotes in a single ~2.6s request**. `fetchAllRobinhoodPrices()`
+uses this directly — no per-symbol limiter, no new
+`ROBINHOOD_PRICE_*_CONCURRENCY`/`INTERVAL_MS` env vars, because there is
+no per-symbol loop to rate-limit. Dexscreener's existing
+`DEXSCREENER_BULK_CONCURRENCY`/`DEXSCREENER_REQUEST_INTERVAL_MS` config
+is not reused for this provider — it governs a fundamentally different,
+per-asset rate-limited loop that Robinhood's price fetch simply doesn't
+have.
+
+### Market-wide integration (`src/domain/market`)
+
+`buildMarketLiquiditySnapshot` starts the bulk price fetch concurrently
+with (not after) the rate-limited per-asset Dexscreener loop, then
+merges by canonical symbol once both finish. Its failure is converted
+via `.then(ok => ..., () => ({ ok: false }))` — it can never throw and
+can never fail the liquidity snapshot.
+
+Three-way distinction, kept as separate signals rather than one
+ambiguous boolean (`MarketPriceMeta`, a sibling of `rows`/`failures`):
+
+```ts
+interface MarketPriceMeta {
+  available: boolean;        // did the bulk price fetch itself succeed?
+  generatedAt: string | null;
+  symbolsMatched: number;    // canonical symbols found in the price response
+  symbolsMissing: number;    // canonical symbols absent from it
+}
+```
+
+Per-row price fields (`robinhoodReferencePriceUsd`,
+`dexLiquidityWeightedPriceUsd`, `premiumDiscountPct`,
+`priceDispersionPct`, `priceCoverageComplete`) default to `null` and are
+filled in only when `price.available` is `true` **and** that specific
+asset's symbol was present in the bulk response — a liquidity success
+with a missing/failed price is never converted into a fabricated `0`,
+and a total price outage never removes or nulls out any row's already-
+computed liquidity metrics. This is directly exercised by dedicated
+tests (`snapshot.test.ts`, "Phase 5 price integration" describe block):
+price success, whole-bulk-fetch failure, one symbol missing from the
+response, a zero-pool asset with a valid reference price (no fabricated
+DEX comparison), and confirmation that the Dexscreener and
+Robinhood-price fetches run independently (one failing doesn't block or
+alter the other's results).
+
+Row sort order (`sortMarketRows`, unchanged from Phase 4: displayed
+liquidity descending, nulls last, symbol ascending tie-break) is still
+liquidity-based, not price-based — price availability does not disturb
+the existing deterministic ordering.
+
+### Caching — price data shares the liquidity snapshot's TTL, deliberately
+
+Robinhood reference prices are **not** given an independent cache
+lifetime. They're fetched once per `buildMarketLiquiditySnapshot()`
+call and therefore implicitly share the existing 5-minute
+`MARKET_SNAPSHOT_TTL_MS` window along with the liquidity data it's
+merged into — a deliberate choice, not an oversight: the two datasets
+are consumed together on every row, a snapshot is already rebuilt from
+scratch every 5 minutes regardless, and Robinhood's own quotes don't
+publish a cache-control lifetime of their own to size a separate TTL
+against. The single-asset `GET /api/assets/{symbol}/price` route is
+uncached (`force-dynamic`, same as every other single-asset route) —
+independent per-request freshness there was never in question.
+
+### Testing
+
+`src/providers/robinhood-price/__tests__/` (schema + client, 19 tests):
+valid/invalid quote shapes, bulk vs. single-symbol URL construction, 404
+unknown-symbol handling, network/timeout/invalid-JSON/schema-invalid
+failures. `src/domain/price/__tests__/dex-price.test.ts` (25 tests):
+base-side and quote-side derivation (using the exact live COST/HOTDOG
+numbers as a fixture), orientation determined only by
+`canonicalAssetSide` never by symbol, zero/negative `priceNative`
+denominators, largest-pool tie-breaking, weighted-average math,
+median odd/even, min/max/dispersion, all-missing/some-missing prices,
+zero- and negative-liquidity pools excluded from weighting but not
+deleted from the pool list, deterministic ordering, empty-pools case.
+`compare.test.ts` (13 tests): mid computation, multiplier scaling
+(including the documented CRWD 4-for-1 case), premium/discount sign and
+edge cases (zero/negative reference, null DEX price, never NaN/
+Infinity), full assembly. `service.test.ts`: symbol/address resolution
+end-to-end, unknown/ambiguous-symbol/malformed-address short-circuits
+(no downstream calls), Dexscreener/Robinhood-price failure propagation,
+missing-symbol-in-price-response error. `snapshot.test.ts` "Phase 5
+price integration": the market-integration scenarios listed above.
+
+### Live smoke test results
+
+Run against the real Robinhood and Dexscreener APIs for NVDA, AAPL, and
+MSFT (`RUN_LIVE_SMOKE=1 npx vitest run
+src/domain/price/__tests__/live-smoke.manual.test.ts` — skipped by
+default in `npm test`, kept as an on-demand tool rather than a
+one-off script):
+
+| Symbol | Robinhood mid | Multiplier | Reference | Largest-pool | Weighted | Median | Min–Max | Dispersion | Pools (usable/total) | Weighted premium/discount |
+|---|---|---|---|---|---|---|---|---|---|---|
+| NVDA | 215.275 | 1.0 | 215.275 | 216.16 | 216.0264 | 216.077 | 215.055–225.59 | 4.88% | 30/30 | +0.349% |
+| AAPL | 310.90 | 1.000566 | 311.076 | 309.24 | 309.5543 | 309.925 | 5.364e-24–323.38 | 104.34% | 30/30 | −0.489% |
+| MSFT | 483.20 | 1.0 | 483.200 | 484.11 | 484.10999502 | 484.048 | 481.384–498.011 | 3.43% | 19/19 | +0.188% |
+
+All six invariant checks passed for all three assets: liquidity-weighted
+and median prices fall within `[min, max]`; the largest-pool price
+matches the actual highest-liquidity usable pool; premium/discount sign
+agrees with the underlying price comparison's sign; no numeric field is
+`NaN`/`Infinity`; `priceCoverage.poolsReporting + poolsMissing ===
+totalPoolCount`; `usablePricePoolCount === priceCoverage.poolsReporting`.
+AAPL's extreme dispersion is the outlier pool documented above — the
+diagnostics surfaced it correctly rather than smoothing it away.
+
+**Manual quote-side derivation proof** (mandatory, done against a live
+pool rather than only the earlier COST/HOTDOG fixture): AAPL pool
+`0x719a752f07c591328c94ba2d1cb44f11d0eafb98f3caf67566c33ba74061c5b6`
+(`AAPLCAT`/`AAPL`, `canonicalAssetSide: "quote"`) — raw Dexscreener
+`priceUsd: "0.00004943"`, `priceNative: "0.0000001625"`. `0.00004943 /
+0.0000001625 = 304.18461538461536`, matching this system's derived
+`canonicalAssetPriceUsd: 304.18461538461537` (floating-point rounding
+only).
+
+### Hardening pass (post-independent-review, still Phase 5)
+
+Four correctness/observability gaps were identified during independent
+review of the uncommitted Phase 5 diff and fixed before commit. Not a
+redesign — the core Phase 5 architecture (provider layer, domain layer,
+API shape, per-asset UI) is unchanged; these are targeted fixes.
+
+**1. Reference-price domain validation.** `buildRobinhoodReferencePrice`
+previously trusted `Number(bid)`/`Number(ask)`/`Number(currentMultiplier)`
+almost entirely to the upstream Zod schema, which only guarantees
+numeric-*looking* strings — not finiteness, non-negativity, or a
+sane bid/ask relationship. It now explicitly validates, before
+constructing a `RobinhoodReferencePrice`: `bid`/`ask` finite and `>= 0`;
+`currentMultiplier` finite and `> 0`; and `bid <= ask` (a crossed
+market is rejected, never silently averaged into a midpoint). Any
+violation throws a typed `PriceComparisonError` subclass —
+`InvalidReferenceQuoteError` (bad bid/ask/multiplier) or
+`CrossedReferenceMarketError` (bid > ask) — never a fabricated
+`NaN`/negative/zero-from-invalid-input reference price. For the
+market-wide snapshot, one invalid quote is caught per-asset and tracked
+(see `symbolsInvalid`/`invalidSymbols` below) rather than throwing out
+of `buildMarketLiquiditySnapshot()` and aborting all ~194 assets — for
+the single-asset API/page, it propagates as a normal `PriceComparisonError`
+(502), exactly like the pre-existing `RobinhoodReferencePriceNotFoundError`.
+
+**2. Outlier resistance — evidence and decision.** Before writing any
+outlier-filtering code, live per-pool price deviation from the median
+was inspected across eight liquid assets (NVDA, AAPL, MSFT, TSLA,
+GOOGL, AMZN, META, COST). Finding: among pools that are already
+liquidity-weighting-eligible (`liquidityUsd > 0`), deviation from the
+median ranged continuously from ~1% to **8.36%** (AMZN) with no natural
+gap separating "legitimate cross-DEX dispersion" from "garbage" — a
+fixed threshold anywhere in that range would either exclude genuine,
+meaningfully-liquid pools (AMZN's outlier pools carried $1.6k–$80k of
+liquidity) or fail to catch anything at all. The one dramatic outlier
+actually observed (an NVDA pool priced at `0.00762` against a `~218.68`
+median, a 100% deviation) already had `liquidityUsd: 0` and was
+*already* excluded from `liquidityWeightedPriceUsd` by the existing
+`liquidityUsd > 0` filter — the failure mode the design was worried
+about (a garbage price with *positive* liquidity materially moving the
+headline number) was not observed live. Per the explicit fallback
+instruction for this situation: **no arbitrary threshold was
+implemented.** Instead, `medianPriceUsd` is now the headline DEX price
+basis everywhere a single number is needed — the market-wide
+`MarketLiquidityRow.premiumDiscountPct`/`dexMedianPriceUsd` (new field)
+and the per-asset page's primary "DEX Premium / Discount" card.
+`liquidityWeightedPriceUsd` (and its premium/discount) remain fully
+computed and exposed, unfiltered, exactly as originally implemented —
+now labeled as a raw diagnostic, not the headline. No fields were
+removed and no computation changed in `dex-price.ts`; this is a
+headline-selection change in `domain/market/snapshot.ts` and the
+per-asset UI only.
+
+**3. Bulk symbol-mismatch observability.** `MarketPriceMeta` previously
+exposed `symbolsMissing` as a count with no way to identify *which*
+canonical symbols were absent from the bulk Robinhood price response.
+It now also carries `missingSymbols: string[]` — canonical registry
+symbols only (never a Dexscreener label, never fuzzy-matched),
+deterministically sorted ascending, empty when nothing is missing or
+when the whole bulk fetch is unavailable (enumerating all ~194 symbols
+in that case would be redundant with `available: false`). A missing
+symbol's price fields stay `null`, exactly as before — this is
+observability, not a behavior change. The same pattern was extended to
+the new invalid-quote case from item 1: `symbolsInvalid`/
+`invalidSymbols` name symbols that *were* present in the bulk response
+but failed domain validation — a genuinely different failure mode from
+"absent," so it is never merged into `missingSymbols`.
+
+**4. Price freshness metadata.** `MarketPriceMeta.generatedAt` is this
+application's snapshot-completion time, not Robinhood's own quote time
+— a materially different thing. `MarketPriceMeta` now also carries
+`oldestQuoteGeneratedAt`/`newestQuoteGeneratedAt`, computed from every
+individual quote's own `generatedAt` field in the bulk response (`null`
+when the bulk fetch is unavailable). No new cache, database, or cron —
+this reads timestamps Robinhood was already sending. The per-asset
+page's existing disclosure sentence already covered this ("data sources
+may be observed at different times"); it was tightened to name the two
+sources explicitly: *"Robinhood reference quotes and DEX pool
+observations may be captured at different times."* No claim is made,
+anywhere, that DEX and Robinhood observations are synchronized.
+
+### Out of scope (Phase 5)
+
+Executable liquidity, slippage, price-impact curves, swap simulation,
+routing/quoting, RPC/on-chain reads, trading, wallet connection,
+database/Redis persistence, scheduled/background jobs, and
+authentication remain unimplemented — see "Project scope" and
+"[Phase 6 direction](#phase-6-direction-not-implemented)" below.
+
 ## Running the application
 
 ```bash
@@ -818,6 +1262,8 @@ unset — see `.env.example`):
 | `MARKET_SNAPSHOT_TTL_MS` | `300000` (5 min) | How long a snapshot stays fresh before the next request triggers a rebuild. |
 
 All three validate strictly: unset uses the default, but a *present* value that isn't a positive integer throws immediately rather than silently falling back.
+
+Phase 5 introduces no new required configuration — `fetchRobinhoodPriceForSymbol`/`fetchAllRobinhoodPrices` reuse `ROBINHOOD_API_BASE_URL`/`ROBINHOOD_API_TIMEOUT_MS` (see "Phase 5: Bulk endpoint discovery" above for why no rate-limit config was needed).
 
 ## Project scope
 
@@ -861,11 +1307,42 @@ All three validate strictly: unset uses the default, but a *present* value that 
   with freshness metadata and a failures panel — no longer a
   proof-of-consumption table.
 
+**Implemented (Phase 5):**
+- Robinhood reference price (`GET /rhj/prices/{symbol}` and the
+  live-discovered bulk `GET /rhj/prices`) compared against three DEX
+  price methodologies (largest-pool, liquidity-weighted, median) with
+  outlier-aware diagnostics (min/max, dispersion, coverage) and
+  premium/discount for all three, never fabricated as zero on partial
+  failure.
+- `GET /api/assets/{symbol}/price`.
+- `getAssetPriceComparisonForAsset/BySymbol/ByAddress` domain API,
+  gated on the same Phase 1 → Phase 2 trust chain, always resolving the
+  Robinhood price lookup by canonical symbol.
+- `/assets/{symbol}` page now shows a "Price" section with the
+  Robinhood reference price, all three DEX price methodologies, their
+  premium/discount, and price coverage — labeled with neutral
+  "Premium"/"Discount" terminology and both providers' own timestamps.
+- Market-wide leaderboard rows (`GET /api/market/liquidity`) now carry
+  the same reference price/premium-discount fields, filled in only when
+  Robinhood's bulk price fetch succeeds and matches that row's symbol —
+  a whole-fetch failure or one missing symbol never touches that row's
+  already-computed liquidity metrics.
+- **Hardening pass** (see above): domain-level reference-quote
+  validation with typed errors and crossed-market rejection; a
+  median-based headline DEX price (`dexMedianPriceUsd`) chosen over
+  liquidity-weighted after live evidence found no defensible outlier
+  threshold, with liquidity-weighted retained as a raw diagnostic;
+  `missingSymbols`/`invalidSymbols` naming exactly which canonical
+  symbols lack a valid bulk price and why; and
+  `oldestQuoteGeneratedAt`/`newestQuoteGeneratedAt` freshness metadata
+  for the bulk price response.
+
 **Explicitly NOT implemented yet:**
 - Historical snapshots, scheduled/background refresh, a persistent job
   queue.
-- Robinhood reference-price comparison, premium/discount, liquidity
-  score, price-discrepancy alerts.
+- Liquidity score, price-discrepancy alerts, or any automated
+  significance/threshold judgment on the premium/discount numbers
+  Phase 5 exposes.
 - Executable liquidity, Uniswap V3/V4 quote simulation, routing,
   price-impact curves, order simulator.
 - PostgreSQL/Drizzle persistence, Redis, background workers, wallet
@@ -873,7 +1350,7 @@ All three validate strictly: unset uses the default, but a *present* value that 
   deployment.
 
 These are intentionally out of scope per the project's incremental build
-plan; see [Phase 5 direction](#phase-5-direction-not-implemented) below.
+plan; see [Phase 6 direction](#phase-6-direction-not-implemented) below.
 
 ## Known limitations
 
@@ -909,6 +1386,20 @@ plan; see [Phase 5 direction](#phase-5-direction-not-implemented) below.
 - Pool rejection reasons (`PoolRejectionReason`) and Phase 3's
   `symbolConflict` flag remain computed/tested but without dedicated UI
   treatment beyond the `⚠`/`†` markers already in place.
+- **Robinhood price data shares the market snapshot's cache/TTL, not an
+  independent one** — see "Phase 5: Caching" above. If Robinhood's
+  quotes update on a materially different cadence than Dexscreener's
+  pool data, the shared 5-minute window is a simplification, not a
+  precision guarantee either provider's own freshness promises.
+- **The mid-of-bid-ask synthesis is this system's own choice, not
+  Robinhood's.** `rawUnderlyingMidUsd = (bid + ask) / 2` collapses a
+  two-sided quote into one number for comparison purposes; the raw
+  `bid`/`ask` remain available on `RobinhoodReferencePrice` for anyone
+  who wants the spread itself rather than its midpoint.
+- Premium/discount numbers are presented with no significance
+  threshold, confidence interval, or "this matters" judgment attached —
+  intentionally left for a human to interpret, not classified into
+  "notable" vs. "noise" by this system.
 
 ## Unresolved risks
 
@@ -933,6 +1424,19 @@ plan; see [Phase 5 direction](#phase-5-direction-not-implemented) below.
   based on inspecting one asset's pools at a time — Phase 4's full
   194-asset run didn't contradict it, but that's still consistent
   evidence, not proof, across every asset's every pool.
+- The quote-side derivation formula (`priceUsd / priceNative`) and the
+  multiplier-application formula are each proved against one live
+  example (an AAPL pool; CRWD's 4-for-1 split) — strong, decisive
+  evidence, but not an exhaustive check across all 194 assets' every
+  pool. An asset with a currently-unknown edge case (e.g. a multiplier
+  that changes mid-session, or a pool type with different native-price
+  semantics) has not been individually verified.
+- The undocumented bulk `GET /rhj/prices` endpoint is empirically real
+  (live-confirmed, all 194 quotes in ~2.6s) but unpublished — Robinhood
+  could change or remove it without notice, since it isn't a documented
+  contract. `fetchRobinhoodPriceForSymbol` (the documented per-symbol
+  form) remains available as a fallback path, just not currently wired
+  into the market-wide snapshot.
 
 ## Why no database yet
 
@@ -944,28 +1448,21 @@ historically. An in-memory single-value cache is simpler, has zero
 operational surface (no connection pool, no migrations, no schema), and
 correctly matches what's actually needed: "don't rebuild this for every
 request," not "remember this forever." Historical persistence is a
-different, real future need (Phase 5+ territory) — it shouldn't be
+different, real future need (Phase 6+ territory) — it shouldn't be
 backed into this phase's cache just because a database would also incur.
 
-## Phase 5 direction (not implemented)
+## Phase 6 direction (not implemented)
 
-Two candidate directions were identified; **Robinhood reference-price
-comparison is the recommended next phase** — it adds another immediately
-useful market-quality dimension (DEX price vs. Robinhood's own reference
-price, premium/discount) with substantially less protocol complexity
-than the alternative:
+With both displayed liquidity (Phase 3/4) and price dislocation
+(Phase 5) now covered, the remaining candidate direction is:
 
-**A. Robinhood reference price + premium/discount** (recommended):
-fetch Robinhood's reference price per asset (`GET
-/rhj/prices/{symbol}`, not yet integrated), compare against each pool's
-`priceUsd`/the asset's volume-weighted DEX price, and surface
-premium/discount on both the per-asset page and the leaderboard.
+**Executable liquidity engine**: on-chain quoting/simulation (Uniswap
+V3/V4) to determine actual swap capacity before a given price-impact
+threshold — the "displayed vs. executable" distinction this project has
+maintained since Phase 3 finally gets its executable half. This requires
+RPC access to Robinhood Chain, pool-type-specific quoting logic
+(constant-product vs. concentrated-liquidity math), and routing across
+multiple pools/ranges — substantially more protocol complexity than
+either Phase 3/4 (aggregation) or Phase 5 (a bid/ask/mid comparison).
 
-**B. Executable liquidity engine**: on-chain quoting/simulation
-(Uniswap V3/V4) to determine actual swap capacity before a given
-price-impact threshold — the "displayed vs. executable" distinction this
-project has maintained since Phase 3 finally gets its executable half.
-Substantially more protocol complexity (pool-type-specific quoting,
-routing across concentrated-liquidity ranges) than option A.
-
-Do not implement either yet.
+Do not implement this yet.

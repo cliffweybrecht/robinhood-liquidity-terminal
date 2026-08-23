@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AssetNotFoundError } from "@/domain/asset";
+import { AssetNotFoundError, getRobinhoodAssetBySymbol } from "@/domain/asset";
 import { getAssetLiquidityProfileBySymbol, type AssetLiquidityProfile } from "@/domain/liquidity";
+import { getAssetPriceComparisonForAsset, type AssetPriceComparison } from "@/domain/price";
 
 // Data must be fetched fresh on every request — see src/app/page.tsx.
 export const dynamic = "force-dynamic";
@@ -25,6 +26,16 @@ function formatPct(value: number | null): string {
 
 function shortAddress(value: string): string {
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
+}
+
+function formatPremiumDiscount(value: number | null): string {
+  if (value === null) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatMagnitudePct(value: number | null): string {
+  return value === null ? "—" : `${value.toFixed(2)}%`;
 }
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -55,6 +66,26 @@ export default async function AssetPoolsPage({
     }
     loadError =
       err instanceof Error ? err.message : "Unknown error loading the liquidity profile.";
+  }
+
+  // Price comparison is fetched independently of the liquidity profile
+  // above, so a Robinhood price failure never erases already-working
+  // liquidity data. Reuses `profile.pools` (already fetched from
+  // Dexscreener for the liquidity profile) rather than re-fetching pools
+  // a second time — only a fresh, cheap, non-rate-limited Robinhood
+  // registry lookup (for `currentMultiplier`) plus one price fetch are
+  // added here.
+  let priceComparison: AssetPriceComparison | null = null;
+  let priceError: string | null = null;
+
+  if (profile) {
+    try {
+      const asset = await getRobinhoodAssetBySymbol(symbol);
+      priceComparison = await getAssetPriceComparisonForAsset(asset, profile.pools);
+    } catch (err) {
+      priceError =
+        err instanceof Error ? err.message : "Unknown error loading the price comparison.";
+    }
   }
 
   return (
@@ -124,6 +155,80 @@ export default async function AssetPoolsPage({
                 label="24h Buys / Sells"
                 value={`${formatCount(profile.activity.buys24h)} / ${formatCount(profile.activity.sells24h)}`}
               />
+            </div>
+
+            <div className="mt-10">
+              <h2 className="text-sm font-medium text-neutral-300">Price</h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                DEX price is derived from validated pools. The headline
+                Premium/Discount figure below compares Robinhood&rsquo;s
+                reference price with the <strong>median</strong> DEX price
+                across all usable pools — chosen over a liquidity-weighted
+                average so that a single garbage-but-positive-liquidity pool
+                cannot dominate the headline signal (see README
+                &ldquo;Outlier resistance&rdquo;). Robinhood reference quotes
+                and DEX pool observations may be captured at different
+                times.
+              </p>
+
+              {priceError ? (
+                <div className="mt-3 rounded border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">
+                  Failed to load the price comparison: {priceError}
+                </div>
+              ) : (
+                priceComparison && (
+                  <>
+                    <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                      <StatCard
+                        label="Robinhood Reference"
+                        value={formatUsd(priceComparison.robinhood.referencePriceUsd)}
+                        sub={
+                          priceComparison.robinhood.isTradingHalt
+                            ? "Trading halted"
+                            : `mid of $${priceComparison.robinhood.rawUnderlyingBidUsd.toFixed(2)}/$${priceComparison.robinhood.rawUnderlyingAskUsd.toFixed(2)} × ${priceComparison.robinhood.currentMultiplier}`
+                        }
+                      />
+                      <StatCard
+                        label="DEX Liquidity-Weighted"
+                        value={formatUsd(priceComparison.dex.liquidityWeightedPriceUsd)}
+                        sub={`${priceComparison.dex.weightedPricePoolCount} pool${priceComparison.dex.weightedPricePoolCount === 1 ? "" : "s"} weighted`}
+                      />
+                      <StatCard
+                        label="DEX Premium / Discount"
+                        value={formatPremiumDiscount(priceComparison.comparison.medianPremiumDiscountPct)}
+                        sub="headline — median-based"
+                      />
+                      <StatCard
+                        label="DEX Price Range"
+                        value={`${formatUsd(priceComparison.dex.minPriceUsd)} – ${formatUsd(priceComparison.dex.maxPriceUsd)}`}
+                        sub={`dispersion ${formatMagnitudePct(priceComparison.dex.priceDispersionPct)}`}
+                      />
+                      <StatCard
+                        label="Largest-Pool Price"
+                        value={formatUsd(priceComparison.dex.largestPoolPriceUsd)}
+                      />
+                      <StatCard
+                        label="Largest-Pool Premium / Discount"
+                        value={formatPremiumDiscount(priceComparison.comparison.largestPoolPremiumDiscountPct)}
+                      />
+                      <StatCard
+                        label="DEX Median"
+                        value={formatUsd(priceComparison.dex.medianPriceUsd)}
+                      />
+                      <StatCard
+                        label="Liquidity-Weighted Premium / Discount"
+                        value={formatPremiumDiscount(priceComparison.comparison.liquidityWeightedPremiumDiscountPct)}
+                        sub="raw diagnostic — not the headline"
+                      />
+                      <StatCard
+                        label="Price Coverage"
+                        value={`${priceComparison.dex.usablePricePoolCount}/${priceComparison.dex.totalPoolCount} pools`}
+                        sub={priceComparison.dex.priceCoverage.complete ? undefined : "partial — some pools have no usable price"}
+                      />
+                    </div>
+                  </>
+                )
+              )}
             </div>
 
             <div className="mt-8 grid gap-8 lg:grid-cols-2">

@@ -77,7 +77,23 @@ describe("projectLiquidityProfileToMarketRow", () => {
       top5ConcentrationPct: 100,
       liquidityCoverageComplete: true,
       volume24hCoverageComplete: true,
+      robinhoodReferencePriceUsd: null,
+      dexLiquidityWeightedPriceUsd: null,
+      dexMedianPriceUsd: null,
+      premiumDiscountPct: null,
+      priceDispersionPct: null,
+      priceCoverageComplete: null,
     });
+  });
+
+  it("defaults all Phase 5 price fields to null — this function has no involvement with price data", () => {
+    const row = projectLiquidityProfileToMarketRow(profile(), null);
+    expect(row.robinhoodReferencePriceUsd).toBeNull();
+    expect(row.dexLiquidityWeightedPriceUsd).toBeNull();
+    expect(row.dexMedianPriceUsd).toBeNull();
+    expect(row.premiumDiscountPct).toBeNull();
+    expect(row.priceDispersionPct).toBeNull();
+    expect(row.priceCoverageComplete).toBeNull();
   });
 
   it("passes through null largestPoolLiquidityUsd when there is no largest pool", () => {
@@ -141,6 +157,12 @@ function row(overrides: Partial<MarketLiquidityRow> = {}): MarketLiquidityRow {
     top5ConcentrationPct: 100,
     liquidityCoverageComplete: true,
     volume24hCoverageComplete: true,
+    robinhoodReferencePriceUsd: null,
+    dexLiquidityWeightedPriceUsd: null,
+    dexMedianPriceUsd: null,
+    premiumDiscountPct: null,
+    priceDispersionPct: null,
+    priceCoverageComplete: null,
     ...overrides,
   };
 }
