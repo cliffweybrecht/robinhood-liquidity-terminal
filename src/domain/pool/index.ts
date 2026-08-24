@@ -4,7 +4,8 @@ export type {
   PoolProvider,
   PoolToken,
 } from "./types";
-export { isValidPairIdentifier } from "./address";
+export { getPairIdentifierShape, isValidPairIdentifier } from "./address";
+export type { PoolIdentifierShape } from "./address";
 export {
   dedupePools,
   normalizePool,

@@ -1458,6 +1458,129 @@ RPC refreshes, and any UI change remain unimplemented — this phase is
 transport only. See [Phase 6 direction](#phase-6-direction-not-implemented)
 below for what comes next.
 
+## Phase 6B: Protocol Census / Classification
+
+Phase 6B answers exactly one question, for every pool Phase 2 already
+discovered and validated: **what protocol family does this pool's
+evidence support — Uniswap V2-like, V3, V4, some other known DEX, or
+unclassifiable — and where does Dexscreener's own labeling conflict with
+what the evidence actually shows?** Discovery/classification only. It
+does **not** verify pool identity on-chain, resolve a Uniswap V4
+PoolKey/PoolId, read token decimals, reconstruct pool state, execute
+quotes, or calculate price impact/executable depth — those remain
+unimplemented (see [Phase 6 direction](#phase-6-direction-not-implemented)
+below).
+
+### Dexscreener labels are not authoritative
+
+`dexId`/`labels` are discovery metadata reported by a third-party
+indexer, not on-chain fact. `classifyPoolProtocol`
+(`src/domain/protocol/classify.ts`) treats them exactly that way: a
+small, explicit, centralized mapping table
+(`src/domain/protocol/mapping.ts`) — keyed per-dexId, not by label
+alone — turns specific, actually-observed `(dexId, label)` combinations
+into a protocol hint. Anything not in that table falls through to
+`UNKNOWN`/`PROVISIONAL`, never a guess from string similarity. No
+regex/substring/fuzzy matching against dexId or label text is performed
+anywhere in this module.
+
+The mapping table currently only has entries for dexId `"uniswap"` +
+label `"v2"`/`"v3"`/`"v4"` — the only combinations this repository has
+actual evidence for (`v3`/`v4` confirmed live and in
+`src/test/fixtures/dexscreener-nvda-valid.json`; `v2` is a structural
+extrapolation of that same confirmed pattern on the same dexId, not
+independently observed — see the code comment in `mapping.ts`). The
+other 7 dexIds observed live (`ramses`, `alandale`, `up`, `giga`,
+`sheriff`, `pancakeswap`, `robinswap` — see "DEX composition" above)
+have no label evidence anywhere in this repository, so they have no
+entries: their pools classify as `UNKNOWN`.
+
+### Identifier shape as evidence, not proof
+
+Every classification records the pool's `pairAddress` shape
+(`ADDRESS_20_BYTE` or `ID_32_BYTE` — see "`pairAddress` is not always a
+contract address" above) as typed evidence and cross-checks it against
+any label-derived protocol hint. A 32-byte identifier is never assumed
+to mean V4, and a 20-byte address is never assumed to mean V2/V3, from
+shape alone — shape only confirms or contradicts label evidence that is
+already present.
+
+Shape detection itself has exactly one implementation:
+`getPairIdentifierShape` in `src/domain/pool/address.ts`. Phase 2's own
+validation (`isValidPairIdentifier`) and Phase 6B's classifier both call
+into it — Phase 6B does not maintain a second copy of the 32-byte PoolId
+pattern. Phase 1–6A behavior is unchanged: `isValidPairIdentifier`'s
+accepted-value set is identical before and after, just implemented in
+terms of the new shared function.
+
+### Conflict and unknown semantics
+
+- **`CONFLICT`** — evidence disagrees (e.g. a `"v3"` label on a 32-byte
+  identifier, or a `"v4"` label on an ordinary 20-byte address — the
+  latter is a real combination this repository has observed live, see
+  "`pairAddress` is not always a contract address" above; or two labels
+  on the same pool that map to different families). Both contradicting
+  pieces of evidence are preserved on the result; the family is never
+  silently resolved to either candidate.
+- **`UNKNOWN`** — no usable evidence: an unrecognized dexId with no
+  matching label.
+- **`PROVISIONAL`** — partial evidence, in either of two cases: (1) a
+  recognized dexId (`uniswap`) with no version-indicating label, or (2) a
+  pool carrying both a recognized label AND at least one other label this
+  repository has no mapping for (e.g. `["v3", "xyz"]`). In both cases the
+  family/version are left `UNKNOWN`/`null` rather than surfaced even
+  provisionally — a caller reading only `family`/`version` never sees a
+  value that other, unaddressed evidence on the same pool partially
+  undermines.
+- **`CLASSIFIED`** — evidence is present, and **every meaningful label on
+  the pool** is understood and internally consistent. A pool is not
+  `CLASSIFIED` just because it has *a* recognized label; if it also
+  carries an unrecognized one, that's `PROVISIONAL`, not `CLASSIFIED`.
+  Empty/whitespace-only label strings (which Phase 2's schema permits,
+  unlike `dexId`) are treated as no label at all and never trigger this
+  downgrade — they carry no information either way.
+
+Every result — regardless of status — carries a typed
+`evidence: ProtocolEvidence[]` array (`DEXSCREENER_DEX_ID`,
+`IDENTIFIER_SHAPE_20_BYTE`/`_32_BYTE`, `EXPLICIT_KNOWN_LABEL_MAPPING`,
+`CONTRADICTORY_LABEL_SHAPE`, `CONTRADICTORY_LABEL_EVIDENCE`,
+`UNSUPPORTED_LABEL`) plus a human-readable `detail` string per entry —
+never an opaque result with no stated reason.
+
+### Pure, network-independent classifier
+
+`classifyPoolProtocol(pool: LiquidityPool): PoolProtocolClassification`
+is a synchronous, deterministic, pure function over an already-validated
+Phase 2 `LiquidityPool` — no RPC calls, no network access, no mutation
+of its input. The Phase 6A RPC foundation is **not** used anywhere in
+this phase: classification is entirely off-chain-metadata-based by
+design, and on-chain pool identity verification is deliberately left to
+a later phase (see "Phase 6 direction" below).
+
+### Live census (manual, opt-in)
+
+A manual script classifies every pool currently discovered across all
+canonical assets and prints an aggregate report — total pools, counts by
+protocol family/status/dexId/identifier shape, and every conflict/
+unknown listed explicitly. Like every other live/manual test in this
+project, it's skipped by `npm test` and only runs on demand:
+
+```bash
+RUN_LIVE_CENSUS=1 npx vitest run src/domain/protocol/__tests__/live-census.manual.test.ts
+```
+
+Its output is evidence, not a canonical fact baked into this repository
+— live protocol distribution can change as pools are created/removed,
+so nothing here hardcodes an expected live count.
+
+### Out of scope (Phase 6B)
+
+On-chain pool identity verification, Uniswap V4 PoolKey/PoolId
+resolution, token decimal reads, pool-state reconstruction, executable
+quoting, price-impact calculation, executable depth, routing, wallet
+functionality, and any UI/API route remain unimplemented — this phase is
+classification only.
+
 ## Running the application
 
 ```bash
@@ -1598,16 +1721,36 @@ wires it in). `npm run dev`/`build`/`test` all work with no
 - Not wired into any route, page, or existing domain layer yet — this
   phase is transport only. See "Phase 6A" above.
 
+**Implemented (Phase 6B):**
+- Pure, deterministic, network-independent pool protocol classification
+  (`src/domain/protocol/`) — `classifyPoolProtocol(pool)` reads only a
+  Phase 2 `LiquidityPool`'s already-validated `dexId`/`labels`/
+  `pairAddress` shape, never RPC, never fuzzy-matched strings.
+- A small, explicit, per-dexId label mapping table
+  (`src/domain/protocol/mapping.ts`), scoped to actually-observed
+  `(dexId, label)` evidence; every unmapped combination fails closed to
+  `UNKNOWN`/`PROVISIONAL` rather than a guess.
+- Typed evidence/provenance on every result (`ProtocolEvidence[]`), and
+  an explicit `CONFLICT` status when a version label and the pool's
+  actual identifier shape (20-byte address vs. 32-byte PoolId)
+  disagree — never silently resolved in either direction.
+- A manual, opt-in live census script
+  (`src/domain/protocol/__tests__/live-census.manual.test.ts`,
+  `RUN_LIVE_CENSUS=1`) that classifies every currently discovered pool
+  across all canonical assets and reports the aggregate distribution.
+- Not wired into any route, page, UI, or the Phase 6A RPC layer — this
+  phase is off-chain classification only. See "Phase 6B" above.
+
 **Explicitly NOT implemented yet:**
 - Historical snapshots, scheduled/background refresh, a persistent job
   queue.
 - Liquidity score, price-discrepancy alerts, or any automated
   significance/threshold judgment on the premium/discount numbers
   Phase 5 exposes.
-- Protocol classification, Uniswap V2/V3/V4 adapters, PoolId
-  resolution, pool-state reconstruction, executable quotes,
-  price-impact calculation, executable depth, multi-pool aggregation,
-  routing, order simulator.
+- On-chain pool identity verification, Uniswap V4 PoolKey/PoolId
+  resolution, token decimal reads, pool-state reconstruction,
+  executable quotes, price-impact calculation, executable depth,
+  multi-pool aggregation, routing, order simulator.
 - PostgreSQL/Drizzle persistence, Redis, background workers, wallet
   connection, trading, transaction signing/submission, authentication,
   production deployment.
@@ -1729,10 +1872,13 @@ multiple pools/ranges — substantially more protocol complexity than
 either Phase 3/4 (aggregation) or Phase 5 (a bid/ask/mid comparison).
 
 Phase 6A (above) built the RPC access layer this requires — a generic,
-protocol-agnostic transport only. Still ahead, none of it implemented:
-protocol classification (identifying which pools are Uniswap V2/V3/V4
-and reconciling that against Dexscreener's own labels), on-chain PoolId
-resolution, pool-state reconstruction, executable quote/price-impact
-math, and routing across multiple pools.
+protocol-agnostic transport only. Phase 6B (above) added off-chain
+protocol classification (identifying, from Dexscreener discovery
+metadata alone, which pools' evidence supports Uniswap V2/V3/V4 vs.
+other/unknown, and flagging where the evidence conflicts). Still ahead,
+none of it implemented: on-chain pool identity verification, Uniswap V4
+PoolKey/PoolId resolution, token decimal reads, pool-state
+reconstruction, executable quote/price-impact math, and routing across
+multiple pools.
 
 Do not implement any of that yet.
