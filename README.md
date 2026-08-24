@@ -1228,6 +1228,236 @@ database/Redis persistence, scheduled/background jobs, and
 authentication remain unimplemented — see "Project scope" and
 "[Phase 6 direction](#phase-6-direction-not-implemented)" below.
 
+## Phase 6A: Robinhood Chain RPC Foundation
+
+Phase 6A implements exactly one thing: a fail-closed, typed,
+deterministic Robinhood Chain JSON-RPC provider (`src/providers/
+robinhood-rpc/`) that later Phase 6 work (protocol classification,
+on-chain pool identity, executable quoting) can safely depend on. It
+does **not** implement any of that later work — no Uniswap adapters, no
+PoolId resolution, no executable quotes, no price-impact math, no
+routing, no UI changes. See "Phase 6 direction" below for what's still
+ahead.
+
+### The trust boundary — three distinct claims, only two proved here
+
+1. **RPC transport success** — the HTTP request succeeded and the
+   response body is a well-formed JSON-RPC 2.0 message for the exact
+   request sent (matching id, `jsonrpc: "2.0"`, a `result` or a
+   well-formed `error`). A `200 OK` HTTP status is **never** treated as
+   sufficient evidence of this on its own — every state-reading
+   operation independently validates the full JSON-RPC envelope.
+2. **Robinhood Chain verification** — the endpoint reports chain ID
+   `4663` (`0x1237`). Proved **structurally**, not by caller convention:
+   the only way to obtain a usable client at all is
+   `createVerifiedRobinhoodRpcClient()`, and construction fails closed
+   unless the endpoint reports `4663`. There is no exported function
+   that reads chain state without having gone through that check first
+   — see "Hardening pass" below for why this changed from the original
+   Phase 6A design.
+3. **Pool identity verification** — that some on-chain address/PoolId is
+   genuinely the pool Dexscreener claims it is, for the protocol
+   Dexscreener claims it uses. **Not proved by anything in Phase 6A.**
+   This is the next layer, and it is deliberately not implemented yet.
+
+The eventual full trust chain, once later Phase 6 work lands:
+
+```
+canonical Robinhood asset (Phase 1)
+  → validated Dexscreener discovery (Phase 2)
+  → protocol classification (not yet implemented)
+  → on-chain pool identity verification (not yet implemented)
+  → token metadata verification (not yet implemented)
+  → executable quote (not yet implemented)
+```
+
+Phase 6A only establishes the RPC transport that the unimplemented
+layers will eventually build on — it does not attempt any of them.
+
+### Hardening pass — verification is structural, not a caller convention
+
+The original Phase 6A design exported five independent functions
+(`getChainId`, `getBlockNumber`, `getCode`, `call`,
+`verifyRobinhoodChainConnection`) and documented "call
+`verifyRobinhoodChainConnection` once before trusting the others."
+Independent architectural review correctly flagged this as too weak for
+infrastructure that later on-chain pool identity and executable-quoting
+work will build on: nothing *structurally* prevented calling
+`getBlockNumber`/`getCode`/`call` directly against an unverified
+endpoint — the API documented the right order but did not enforce it.
+
+The fix: the only exported entry point into this module's state-reading
+capability is now
+
+```ts
+const rpc = await createVerifiedRobinhoodRpcClient(options);
+// rpc.chainId === 4663, guaranteed — or the promise above already rejected.
+await rpc.getBlockNumber();
+await rpc.getCode(address, blockTag?);
+await rpc.call({ to, data }, blockTag?);
+```
+
+`getChainId`/`getBlockNumber`/`getCode`/`call` are now module-private.
+Successful construction of a `VerifiedRobinhoodRpcClient` is itself the
+proof that the connection was verified — there is no code path that
+produces a usable client without having proven the chain ID first, and
+no exported function whose name could be mistaken for an
+already-verified operation when it isn't one. `verifyRobinhoodChainConnection`
+as a standalone export was removed entirely — its logic (call
+`eth_chainId`, compare to `4663`, throw `RobinhoodRpcWrongChainError`
+otherwise) now lives inside the factory, since a separate public
+function performing the same check would just reintroduce a second,
+bypassable path.
+
+Verification still happens **exactly once**, at construction — the
+factory never re-checks `eth_chainId` before an individual
+`getBlockNumber`/`getCode`/`call`, matching the original design's
+"don't re-handshake per call" reasoning, which review confirmed was
+correct. The resolved `rpcUrl`/`timeoutMs` are captured in a closure at
+construction time and reused for every subsequent call on that client,
+so a client's calls are guaranteed to target the exact endpoint that
+was verified — even if `process.env.ROBINHOOD_RPC_URL` were somehow
+mutated afterward.
+
+### Configuration — `ROBINHOOD_RPC_URL` has no default
+
+Unlike every other provider's base URL in this project (each has a real
+public default), `ROBINHOOD_RPC_URL` is **required** — there is no
+value safe to silently fall back to. Guessing wrong here means talking
+to the wrong chain entirely, which is exactly what this module exists
+to prevent. Missing, empty, or non-http(s) configuration fails
+immediately with a typed `RobinhoodRpcConfigError`, thrown out of
+`createVerifiedRobinhoodRpcClient` before any network request.
+`ROBINHOOD_RPC_TIMEOUT_MS` is optional (default 8000ms), following the
+same pattern as every other provider's timeout config.
+
+### RPC operations implemented
+
+Exactly three generic, protocol-agnostic state-reading operations,
+reachable only via a verified client's methods — no protocol-specific
+functionality, no Multicall, no log/event scanning, no transaction
+submission:
+
+- **`rpc.getBlockNumber()`** — `eth_blockNumber`, returns a `bigint`
+  (never a floating-point `number` — block numbers are chain
+  quantities).
+- **`rpc.getCode(address, blockTag?)`** — `eth_getCode`. `address` is
+  validated as a 20-byte EVM address *before* any network request.
+  `"0x"` is a valid, successful result meaning "no code at this
+  address" — returned exactly as `"0x"`, never coerced to `null`,
+  `false`, or treated as failure.
+- **`rpc.call({to, data}, blockTag?)`** — `eth_call`. Both `to` and
+  `data` are validated before any network request. Returns raw
+  validated hex bytes — **no ABI decoding**, no knowledge of Uniswap,
+  pools, PoolIds, token decimals, or Dexscreener. That belongs in a
+  protocol-specific layer above this one, not implemented yet.
+
+`eth_chainId` itself is not separately exposed — it's an implementation
+detail of `createVerifiedRobinhoodRpcClient`, and its result is
+surfaced only as the client's `chainId` property (always `4663` on a
+successfully-constructed client).
+
+Block tags support `"latest"` and an explicit non-negative `bigint`
+block number — enough for a future service to pin multiple related
+reads to the same block, without committing to every Ethereum block-tag
+variant (`"pending"`, `"safe"`, `"finalized"`, …) this codebase has no
+present use for.
+
+### Address vs. PoolId — foundational for later Phase 6 work
+
+`getCode`/`call` destinations accept **only** valid 20-byte (`0x` + 40
+hex) addresses. A 32-byte Uniswap V4 PoolId (`0x` + 64 hex, the same
+shape Phase 2's pool discovery already had to handle — see
+`src/domain/pool/address.ts`) is rejected before any network request —
+never truncated, coerced, or reinterpreted. This distinction matters
+now, before any protocol-specific code exists, precisely so it can't be
+gotten wrong later under time pressure.
+
+### Hex/bigint normalization (`src/lib/evm/hex.ts`)
+
+Two distinct hex shapes, deliberately never conflated:
+
+- **Hex bytes** (`isHexBytes`) — `0x` + an *even* number of hex digits.
+  Used for bytecode/calldata. `"0x"` (zero bytes) is valid.
+- **Hex quantities** (`isHexQuantity`) — `0x` + *at least one* hex
+  digit, odd counts allowed. Used for `eth_chainId`/`eth_blockNumber`
+  results and explicit block-number parameters.
+
+`hexQuantityToBigInt` parses a validated quantity into a `bigint` —
+chain quantities are never run through `parseInt` or any
+floating-point path; a block number like `0xffffffffffffffff` parses
+exactly, without the precision loss a `Number()` conversion would cause
+past `Number.MAX_SAFE_INTEGER`.
+
+### Error model
+
+Every failure mode is a distinct, typed `RobinhoodRpcError` subclass —
+network failure, timeout, non-2xx HTTP, invalid JSON, malformed
+JSON-RPC response (wrong version / missing or mismatched id / neither
+result nor error present), a JSON-RPC-level error response, an
+invalid/malformed result shape, invalid address input, invalid hex
+bytes input, invalid block tag input, missing/invalid configuration,
+and — most explicitly — `RobinhoodRpcWrongChainError`, carrying both
+`expectedChainId` (4663) and the `actualChainId` actually reported (the
+only failure mode that can only occur inside
+`createVerifiedRobinhoodRpcClient`, never from a state-reading call on
+an already-verified client). Nothing is ever silently swallowed into a
+fabricated result.
+
+### Request-id counter — deliberately left unbounded
+
+Each JSON-RPC request gets a fresh id from a simple per-process
+incrementing counter, with no rollover handling. This was inspected
+during the hardening pass and left as-is: reaching
+`Number.MAX_SAFE_INTEGER` would require ~9 quadrillion RPC calls within
+one process's lifetime, which isn't realistic for this application, and
+a rollover branch could not be meaningfully unit-tested without either
+exposing private module state (defeating the point of it being private)
+or actually looping billions of times. Adding untestable code for a
+threat that isn't real at this scale was judged worse than leaving the
+counter simple.
+
+### Testing
+
+Normal tests (`npm test`) are completely network-independent — every
+JSON-RPC response is mocked via an injectable `fetchImpl`, exactly like
+every other provider in this project. Coverage includes: construction
+success/wrong-chain/malformed-chain-quantity/config-failure, with
+explicit assertions that a failed construction never yields a client at
+all; that state-reading calls on an already-verified client never issue
+a second `eth_chainId` request; block-number parsing including a value
+beyond `Number.MAX_SAFE_INTEGER`; `getCode`/`call` success, `"0x"`
+preserved as success, malformed bytecode/calldata rejected, invalid
+address and PoolId-shaped input rejected *before* any state-operation
+network call; and JSON-RPC transport correctness (non-2xx HTTP, timeout
+distinct from network failure, invalid JSON, a JSON-RPC error object,
+missing/mismatched response id, wrong `jsonrpc` version, a response
+with neither/both `result`/`error`) exercised both at construction and
+on a post-construction state call, proving the shared transport
+validation applies identically in both contexts.
+
+An opt-in live smoke test
+(`src/providers/robinhood-rpc/__tests__/live-smoke.manual.test.ts`),
+gated by `RUN_LIVE_SMOKE=1` exactly like Phase 5's, proves only that
+`createVerifiedRobinhoodRpcClient()` succeeds against the configured
+endpoint and that the resulting client's `getBlockNumber()` returns a
+plausible current block — deliberately narrow, with no
+Dexscreener/Uniswap/token/pool dependency:
+
+```bash
+RUN_LIVE_SMOKE=1 npx vitest run src/providers/robinhood-rpc/__tests__/live-smoke.manual.test.ts
+```
+
+### Out of scope (Phase 6A)
+
+Protocol classification, Uniswap V2/V3/V4 adapters, PoolId resolution,
+pool-state reconstruction, executable quotes, price-impact calculation,
+executable depth, multi-pool aggregation, routing, wallet functionality,
+transaction construction/signing, database functionality, market-wide
+RPC refreshes, and any UI change remain unimplemented — this phase is
+transport only. See [Phase 6 direction](#phase-6-direction-not-implemented)
+below for what comes next.
+
 ## Running the application
 
 ```bash
@@ -1245,9 +1475,10 @@ npm run build     # next build (production build)
 
 No API keys or secrets are required for any phase — both `/rhj/assets`
 and Dexscreener's `/token-pairs/v1` are public, unauthenticated
-endpoints. Phase 2/3's single-asset lookups make exactly one Dexscreener
-request each, well under any plausible limit. Phase 4's bulk snapshot is
-the one place volume matters — see
+endpoints, and `ROBINHOOD_RPC_URL` (Phase 6A) is a plain RPC endpoint
+URL, not a credential. Phase 2/3's single-asset lookups make exactly
+one Dexscreener request each, well under any plausible limit. Phase 4's
+bulk snapshot is the one place volume matters — see
 [Phase 4](#phase-4-bulk-market-snapshot-and-liquidity-leaderboard) above
 for the rate-limit evidence and the concurrency/interval strategy built
 around it.
@@ -1264,6 +1495,17 @@ unset — see `.env.example`):
 All three validate strictly: unset uses the default, but a *present* value that isn't a positive integer throws immediately rather than silently falling back.
 
 Phase 5 introduces no new required configuration — `fetchRobinhoodPriceForSymbol`/`fetchAllRobinhoodPrices` reuse `ROBINHOOD_API_BASE_URL`/`ROBINHOOD_API_TIMEOUT_MS` (see "Phase 5: Bulk endpoint discovery" above for why no rate-limit config was needed).
+
+Phase 6A introduces the project's first genuinely **required**
+configuration value — but only for code that actually calls the new RPC
+provider, which nothing in the running app does yet (no route or page
+wires it in). `npm run dev`/`build`/`test` all work with no
+`ROBINHOOD_RPC_URL` set at all.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ROBINHOOD_RPC_URL` | *(none — required to use the RPC provider)* | JSON-RPC endpoint for Robinhood Chain. See "Phase 6A" above — no public default exists or is safely guessable. |
+| `ROBINHOOD_RPC_TIMEOUT_MS` | `8000` | Timeout for outbound Robinhood Chain RPC requests. |
 
 ## Project scope
 
@@ -1337,17 +1579,38 @@ Phase 5 introduces no new required configuration — `fetchRobinhoodPriceForSymb
   `oldestQuoteGeneratedAt`/`newestQuoteGeneratedAt` freshness metadata
   for the bulk price response.
 
+**Implemented (Phase 6A):**
+- A generic, protocol-agnostic Robinhood Chain JSON-RPC provider
+  (`src/providers/robinhood-rpc/`), built around one factory —
+  `createVerifiedRobinhoodRpcClient()` — that verifies chain ID 4663 at
+  construction and returns a client exposing `getBlockNumber`/`getCode`/
+  `call`. Chain verification is structural, not a caller convention:
+  there is no exported function that reads chain state without having
+  gone through the factory first — see "Hardening pass" above.
+- Full JSON-RPC 2.0 response correctness validation (id match, version,
+  result-vs-error) — a `200 OK` HTTP status is never treated as
+  sufficient evidence of RPC success.
+- Fail-closed address/PoolId safety: a 32-byte PoolId-shaped value is
+  rejected before any network request wherever a 20-byte address is
+  required, never truncated or coerced.
+- Bigint-based chain-quantity handling (`src/lib/evm/hex.ts`) — no
+  floating-point block numbers or chain IDs.
+- Not wired into any route, page, or existing domain layer yet — this
+  phase is transport only. See "Phase 6A" above.
+
 **Explicitly NOT implemented yet:**
 - Historical snapshots, scheduled/background refresh, a persistent job
   queue.
 - Liquidity score, price-discrepancy alerts, or any automated
   significance/threshold judgment on the premium/discount numbers
   Phase 5 exposes.
-- Executable liquidity, Uniswap V3/V4 quote simulation, routing,
-  price-impact curves, order simulator.
+- Protocol classification, Uniswap V2/V3/V4 adapters, PoolId
+  resolution, pool-state reconstruction, executable quotes,
+  price-impact calculation, executable depth, multi-pool aggregation,
+  routing, order simulator.
 - PostgreSQL/Drizzle persistence, Redis, background workers, wallet
-  connection, trading, transaction signing, authentication, production
-  deployment.
+  connection, trading, transaction signing/submission, authentication,
+  production deployment.
 
 These are intentionally out of scope per the project's incremental build
 plan; see [Phase 6 direction](#phase-6-direction-not-implemented) below.
@@ -1465,4 +1728,11 @@ RPC access to Robinhood Chain, pool-type-specific quoting logic
 multiple pools/ranges — substantially more protocol complexity than
 either Phase 3/4 (aggregation) or Phase 5 (a bid/ask/mid comparison).
 
-Do not implement this yet.
+Phase 6A (above) built the RPC access layer this requires — a generic,
+protocol-agnostic transport only. Still ahead, none of it implemented:
+protocol classification (identifying which pools are Uniswap V2/V3/V4
+and reconciling that against Dexscreener's own labels), on-chain PoolId
+resolution, pool-state reconstruction, executable quote/price-impact
+math, and routing across multiple pools.
+
+Do not implement any of that yet.
