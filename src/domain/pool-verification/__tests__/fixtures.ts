@@ -173,6 +173,12 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       }
       throw new Error(`unstubbed fake RPC call: to=${request.to} data=${request.data}`);
     },
+    // Phase 6C.1 (Uniswap V3 identity verification) has no use for
+    // eth_getLogs — this stub exists only so the fake client satisfies
+    // VerifiedRobinhoodRpcClient's shape (Phase 6A.1 added getLogs).
+    getLogs: async () => {
+      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6C.1 V3 verification)");
+    },
   };
 
   return { rpc, calls };

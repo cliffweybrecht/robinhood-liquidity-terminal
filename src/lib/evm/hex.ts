@@ -2,6 +2,7 @@ import type { Hex } from "viem";
 
 const HEX_BYTES_PATTERN = /^0x([0-9a-fA-F]{2})*$/;
 const HEX_QUANTITY_PATTERN = /^0x[0-9a-fA-F]+$/;
+const HEX_32_BYTE_WORD_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /**
  * Whether `value` is a syntactically valid 0x-prefixed hex *byte
@@ -33,6 +34,18 @@ export function isHexBytes(value: unknown): value is Hex {
  */
 export function isHexQuantity(value: unknown): value is Hex {
   return typeof value === "string" && HEX_QUANTITY_PATTERN.test(value);
+}
+
+/**
+ * Whether `value` is a syntactically valid 0x-prefixed hex string of
+ * *exactly* 32 bytes (64 hex characters) — one EVM word. This is
+ * stricter than `isHexBytes` (which allows any even byte count):
+ * log topics, transaction hashes, and block hashes are always exactly
+ * one word, never shorter or longer, and a value of the wrong length
+ * is malformed regardless of whether it happens to be valid hex.
+ */
+export function isHex32ByteWord(value: unknown): value is Hex {
+  return typeof value === "string" && HEX_32_BYTE_WORD_PATTERN.test(value);
 }
 
 /**

@@ -1,11 +1,11 @@
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 import {
   fetchWithTimeout,
   HttpNetworkError,
   HttpTimeoutError,
 } from "@/lib/http/fetchWithTimeout";
-import { isValidEvmAddress } from "@/lib/evm/address";
-import { hexQuantityToBigInt, isHexBytes, isHexQuantity } from "@/lib/evm/hex";
+import { isValidEvmAddress, toChecksummedAddress } from "@/lib/evm/address";
+import { hexQuantityToBigInt, isHex32ByteWord, isHexBytes, isHexQuantity } from "@/lib/evm/hex";
 import { jsonRpcEnvelopeSchema } from "./schema";
 import {
   RobinhoodRpcConfigError,
@@ -16,6 +16,7 @@ import {
   RobinhoodRpcInvalidHexBytesError,
   RobinhoodRpcInvalidJsonError,
   RobinhoodRpcInvalidResultError,
+  RobinhoodRpcInvalidTopicError,
   RobinhoodRpcMalformedResponseError,
   RobinhoodRpcNetworkError,
   RobinhoodRpcTimeoutError,
@@ -131,6 +132,56 @@ export interface EthCallRequest {
 }
 
 /**
+ * An `eth_getLogs` filter. `address`/`topics` are both required
+ * (unlike the raw JSON-RPC method, where both are optional) — this
+ * client has no representation of "match any address"/"match any
+ * topic at every position," since a caller with a genuinely unbounded
+ * query is not this module's concern (see the module doc comment: this
+ * boundary stays generic, and an unbounded log scan is exactly the kind
+ * of usage-pattern decision that belongs one layer up). `topics[i]` is
+ * `null` for "any value at this position," a single `Hex` for an exact
+ * match, or a `readonly Hex[]` for "any of these" (an OR at that
+ * position) — the same three-way shape the JSON-RPC spec itself uses.
+ * `fromBlock`/`toBlock` reuse the existing `BlockTag` type unchanged —
+ * no `"pending"`/`"earliest"`/etc. was added; see `LogEntry` for why
+ * that matters.
+ */
+export interface EthGetLogsFilter {
+  readonly address: Address | readonly Address[];
+  readonly topics: readonly (Hex | readonly Hex[] | null)[];
+  readonly fromBlock: BlockTag;
+  readonly toBlock: BlockTag;
+}
+
+/**
+ * One already-mined log entry, fully validated. Every field the
+ * Ethereum JSON-RPC spec defines for a log is represented — including
+ * `blockHash`/`transactionIndex`, which a smaller type might have been
+ * tempted to drop, but which are genuine provenance fields a caller may
+ * need (e.g. to detect which fork/branch a log came from) and which
+ * compliant nodes always return for a mined log.
+ *
+ * Deliberately does NOT support pending logs: the spec allows
+ * `blockNumber`/`blockHash`/`transactionHash`/`transactionIndex`/
+ * `logIndex` to be `null` for a log from a pending (not yet mined)
+ * block, but this client's `BlockTag` has no `"pending"` value — there
+ * is no request this client can make that should legitimately produce
+ * one. A `null` in any of those fields is treated as an untrusted/
+ * malformed result, not a value this type can express.
+ */
+export interface LogEntry {
+  readonly address: Address;
+  readonly topics: readonly Hex[];
+  readonly data: Hex;
+  readonly blockNumber: bigint;
+  readonly blockHash: Hex;
+  readonly transactionHash: Hex;
+  readonly transactionIndex: number;
+  readonly logIndex: number;
+  readonly removed: boolean;
+}
+
+/**
  * A Robinhood Chain RPC connection whose chain identity has already
  * been verified as `4663` at construction time — see
  * `createVerifiedRobinhoodRpcClient`. `chainId` is included as a
@@ -138,15 +189,16 @@ export interface EthCallRequest {
  * for any successfully-constructed client, but present so callers/tests
  * don't have to hardcode that assumption).
  *
- * These three methods are the *only* way this module exposes
- * `eth_getCode`/`eth_call`/`eth_blockNumber` — there is no standalone
- * exported function for any of them.
+ * These four methods are the *only* way this module exposes
+ * `eth_getCode`/`eth_call`/`eth_blockNumber`/`eth_getLogs` — there is
+ * no standalone exported function for any of them.
  */
 export interface VerifiedRobinhoodRpcClient {
   readonly chainId: number;
   getBlockNumber(): Promise<bigint>;
   getCode(address: string, blockTag?: BlockTag): Promise<Hex>;
   call(request: EthCallRequest, blockTag?: BlockTag): Promise<Hex>;
+  getLogs(filter: EthGetLogsFilter): Promise<readonly LogEntry[]>;
 }
 
 /**
@@ -429,6 +481,214 @@ async function call(
   return result;
 }
 
+function validateAddressFilterValue(value: EthGetLogsFilter["address"]): void {
+  // Discriminate via `typeof` rather than `Array.isArray` — TS's builtin
+  // `Array.isArray` type predicate targets `any[]` and does not reliably
+  // narrow a `string | readonly string[]`-shaped union.
+  if (typeof value === "string") {
+    if (!isValidEvmAddress(value)) {
+      throw new RobinhoodRpcInvalidAddressError(value);
+    }
+    return;
+  }
+  if (value.length === 0) {
+    throw new RobinhoodRpcInvalidAddressError(
+      "[] (empty address array — ambiguous; this filter requires at least one address)",
+    );
+  }
+  for (const address of value) {
+    if (!isValidEvmAddress(address)) {
+      throw new RobinhoodRpcInvalidAddressError(address);
+    }
+  }
+}
+
+/**
+ * `null` is always valid (a wildcard). A concrete topic must be exactly
+ * 32-byte hex. An OR-array of topics must be non-empty — an empty
+ * OR-array is exactly as ambiguous as an empty address array, and
+ * `null` is already the unambiguous way to express "any value here."
+ */
+function validateTopicsFilter(topics: EthGetLogsFilter["topics"]): void {
+  for (const entry of topics) {
+    if (entry === null) continue;
+    if (Array.isArray(entry)) {
+      if (entry.length === 0) {
+        throw new RobinhoodRpcInvalidTopicError(
+          "[] (empty OR-topic array — ambiguous; use null for a wildcard at this position)",
+        );
+      }
+      for (const topic of entry) {
+        if (!isHex32ByteWord(topic)) {
+          throw new RobinhoodRpcInvalidTopicError(String(topic));
+        }
+      }
+      continue;
+    }
+    if (!isHex32ByteWord(entry)) {
+      throw new RobinhoodRpcInvalidTopicError(String(entry));
+    }
+  }
+}
+
+/**
+ * Validates both block tags individually (via `encodeBlockTagParam`,
+ * shared with `getCode`/`call`) and, when both are explicit block
+ * numbers, that the range isn't inverted — a locally-detectable,
+ * always-meaningless input worth rejecting before a network request
+ * rather than leaving it to the node to reject (or silently accept and
+ * return an empty result for, depending on the implementation).
+ */
+function validateBlockRange(
+  fromBlock: BlockTag,
+  toBlock: BlockTag,
+): { readonly fromBlockParam: string; readonly toBlockParam: string } {
+  const fromBlockParam = encodeBlockTagParam(fromBlock);
+  const toBlockParam = encodeBlockTagParam(toBlock);
+  if (typeof fromBlock === "bigint" && typeof toBlock === "bigint" && fromBlock > toBlock) {
+    throw new RobinhoodRpcInvalidBlockTagError(`fromBlock (${fromBlock}) > toBlock (${toBlock})`);
+  }
+  return { fromBlockParam, toBlockParam };
+}
+
+function parseSafeIndexQuantity(value: unknown, field: string, fail: (reason: string) => never): number {
+  if (typeof value !== "string" || !isHexQuantity(value)) {
+    return fail(`"${field}" is not a valid hex quantity`);
+  }
+  const parsed = hexQuantityToBigInt(value);
+  if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return fail(`"${field}" is outside the safe integer range`);
+  }
+  return Number(parsed);
+}
+
+/**
+ * Validates one raw `eth_getLogs` result array entry into a `LogEntry`,
+ * or throws `RobinhoodRpcInvalidResultError` — never returns a partial
+ * or best-effort value. `index` is only used to make the thrown error's
+ * `reason` identify exactly which entry failed.
+ */
+function parseLogEntry(raw: unknown, index: number): LogEntry {
+  function fail(reason: string): never {
+    throw new RobinhoodRpcInvalidResultError("eth_getLogs", raw, `log at index ${index}: ${reason}`);
+  }
+
+  if (typeof raw !== "object" || raw === null) {
+    fail("expected a log object");
+  }
+  const log = raw as Record<string, unknown>;
+
+  if (typeof log.address !== "string" || !isValidEvmAddress(log.address)) {
+    fail('"address" is not a valid 20-byte EVM address');
+  }
+  const address = toChecksummedAddress(log.address as string);
+
+  if (!Array.isArray(log.topics)) {
+    fail('"topics" is not an array');
+  }
+  const topics: Hex[] = [];
+  (log.topics as unknown[]).forEach((topic, topicIndex) => {
+    if (!isHex32ByteWord(topic)) {
+      fail(`"topics[${topicIndex}]" is not valid 32-byte hex`);
+    }
+    topics.push(topic as Hex);
+  });
+
+  if (typeof log.data !== "string" || !isHexBytes(log.data)) {
+    fail('"data" is not valid hex bytes');
+  }
+
+  if (log.blockNumber === null) {
+    fail('"blockNumber" is null — pending logs are not supported by this client');
+  }
+  if (typeof log.blockNumber !== "string" || !isHexQuantity(log.blockNumber)) {
+    fail('"blockNumber" is not a valid hex quantity');
+  }
+  const blockNumber = hexQuantityToBigInt(log.blockNumber as string);
+
+  if (log.blockHash === null) {
+    fail('"blockHash" is null — pending logs are not supported by this client');
+  }
+  if (typeof log.blockHash !== "string" || !isHex32ByteWord(log.blockHash)) {
+    fail('"blockHash" is not valid 32-byte hex');
+  }
+
+  if (log.transactionHash === null) {
+    fail('"transactionHash" is null — pending logs are not supported by this client');
+  }
+  if (typeof log.transactionHash !== "string" || !isHex32ByteWord(log.transactionHash)) {
+    fail('"transactionHash" is not valid 32-byte hex');
+  }
+
+  if (log.transactionIndex === null) {
+    fail('"transactionIndex" is null — pending logs are not supported by this client');
+  }
+  const transactionIndex = parseSafeIndexQuantity(log.transactionIndex, "transactionIndex", fail);
+
+  if (log.logIndex === null) {
+    fail('"logIndex" is null — pending logs are not supported by this client');
+  }
+  const logIndex = parseSafeIndexQuantity(log.logIndex, "logIndex", fail);
+
+  if (typeof log.removed !== "boolean") {
+    fail('"removed" is not a boolean');
+  }
+
+  return {
+    address,
+    topics,
+    data: log.data,
+    blockNumber,
+    blockHash: log.blockHash as Hex,
+    transactionHash: log.transactionHash as Hex,
+    transactionIndex,
+    logIndex,
+    removed: log.removed as boolean,
+  };
+}
+
+/**
+ * `eth_getLogs(filter)`. Module-private — reachable only via
+ * `VerifiedRobinhoodRpcClient.getLogs`. `filter.address`/`filter.topics`
+ * are validated *before* any network request (see
+ * `validateAddressFilterValue`/`validateTopicsFilter`/
+ * `validateBlockRange`). Exactly one `eth_getLogs` request is issued —
+ * no pagination, no chunking, no automatic retries beyond whatever
+ * generic transport behavior `callRpc` already has; a caller needing a
+ * wide block range serviced in multiple requests is a usage pattern
+ * that belongs one layer up, not in this generic transport.
+ *
+ * The returned `result` is treated as fully untrusted: it must itself
+ * be an array, and every entry must independently validate as a
+ * complete, already-mined log (`parseLogEntry`) — if even one entry is
+ * malformed, the whole call fails closed rather than returning a
+ * partially-trusted array.
+ */
+async function getLogs(filter: EthGetLogsFilter, options: RobinhoodRpcOptions): Promise<readonly LogEntry[]> {
+  validateAddressFilterValue(filter.address);
+  validateTopicsFilter(filter.topics);
+  const { fromBlockParam, toBlockParam } = validateBlockRange(filter.fromBlock, filter.toBlock);
+
+  const result = await callRpc(
+    "eth_getLogs",
+    [
+      {
+        address: filter.address,
+        topics: filter.topics,
+        fromBlock: fromBlockParam,
+        toBlock: toBlockParam,
+      },
+    ],
+    options,
+  );
+
+  if (!Array.isArray(result)) {
+    throw new RobinhoodRpcInvalidResultError("eth_getLogs", result, "expected an array of log entries");
+  }
+
+  return result.map((entry, index) => parseLogEntry(entry, index));
+}
+
 /**
  * The one exported entry point into this module's state-reading
  * operations. Resolves configuration exactly once (so every subsequent
@@ -465,5 +725,6 @@ export async function createVerifiedRobinhoodRpcClient(
     getBlockNumber: () => getBlockNumber(resolvedOptions),
     getCode: (address, blockTag = "latest") => getCode(address, blockTag, resolvedOptions),
     call: (request, blockTag = "latest") => call(request, blockTag, resolvedOptions),
+    getLogs: (filter) => getLogs(filter, resolvedOptions),
   };
 }

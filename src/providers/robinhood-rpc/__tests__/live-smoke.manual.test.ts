@@ -33,4 +33,47 @@ describe.skipIf(!RUN_LIVE)("Robinhood Chain RPC live smoke test", () => {
     expect(typeof blockNumber).toBe("bigint");
     expect(blockNumber).toBeGreaterThan(0n);
   }, 30000);
+
+  /**
+   * Phase 6A.1 — proves the generic `getLogs` primitive against a real
+   * endpoint. Deliberately protocol-agnostic: queries a small, bounded,
+   * recent block range with no topic filter, against Permit2
+   * (`0x000000000022D473030F116dDEE9F6B43aC78BA3`) purely because it is
+   * a well-known, generically-deployed contract already confirmed
+   * present on Robinhood Chain — not because this test or the client it
+   * exercises knows anything about what Permit2 is or does. This test
+   * asserts only the generic shape (`getLogs` resolves, returns an
+   * array, and every entry — if any — satisfies `LogEntry`'s fully
+   * validated, already-mined shape); it makes no assertion about how
+   * many logs exist, since that's real, changing chain data, not this
+   * test's concern.
+   */
+  it("getLogs queries a small bounded recent range and returns a validated array", async () => {
+    const rpc = await createVerifiedRobinhoodRpcClient();
+    const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+    const currentBlock = await rpc.getBlockNumber();
+    const fromBlock = currentBlock > 500n ? currentBlock - 500n : 0n;
+
+    const logs = await rpc.getLogs({
+      address: PERMIT2,
+      topics: [],
+      fromBlock,
+      toBlock: currentBlock,
+    });
+
+    console.log(`\n=== Robinhood Chain RPC getLogs live smoke ===`);
+    console.log(`queried block range: ${fromBlock} .. ${currentBlock}`);
+    console.log(`logs found: ${logs.length}`);
+    if (logs[0]) {
+      console.log(`first log: block=${logs[0].blockNumber} tx=${logs[0].transactionHash} logIndex=${logs[0].logIndex}`);
+    }
+
+    expect(Array.isArray(logs)).toBe(true);
+    for (const log of logs) {
+      expect(log.removed).toBe(false);
+      expect(log.blockNumber).toBeGreaterThanOrEqual(fromBlock);
+      expect(log.blockNumber).toBeLessThanOrEqual(currentBlock);
+    }
+  }, 30000);
 });

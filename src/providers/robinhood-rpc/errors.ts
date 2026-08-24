@@ -25,6 +25,7 @@ export type RobinhoodRpcErrorCode =
   | "INVALID_ADDRESS"
   | "INVALID_HEX_BYTES"
   | "INVALID_BLOCK_TAG"
+  | "INVALID_TOPIC"
   | "WRONG_CHAIN";
 
 export abstract class RobinhoodRpcError extends Error {
@@ -159,6 +160,25 @@ export class RobinhoodRpcInvalidHexBytesError extends RobinhoodRpcError {
   constructor(input: string) {
     super(`"${input}" is not valid 0x-prefixed hex bytes`);
     this.name = "RobinhoodRpcInvalidHexBytesError";
+    this.input = input;
+  }
+}
+
+/**
+ * Caller-supplied `eth_getLogs` topic input is invalid — either a
+ * concrete topic value that isn't exactly 32 bytes of hex, or an empty
+ * array where one is not meaningful (an empty address list or an empty
+ * OR-topic list at a given position is ambiguous — use `null` for "any
+ * value at this position" instead of `[]`). Checked before any network
+ * request.
+ */
+export class RobinhoodRpcInvalidTopicError extends RobinhoodRpcError {
+  readonly code = "INVALID_TOPIC" as const;
+  readonly input: string;
+
+  constructor(input: string) {
+    super(`"${input}" is not a valid eth_getLogs topic (must be exactly 32-byte hex, or an array of such values)`);
+    this.name = "RobinhoodRpcInvalidTopicError";
     this.input = input;
   }
 }

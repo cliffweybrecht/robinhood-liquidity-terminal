@@ -2,6 +2,8 @@ export { ROBINHOOD_CHAIN_ID, createVerifiedRobinhoodRpcClient } from "./client";
 export type {
   BlockTag,
   EthCallRequest,
+  EthGetLogsFilter,
+  LogEntry,
   RobinhoodRpcOptions,
   VerifiedRobinhoodRpcClient,
 } from "./client";
@@ -15,6 +17,7 @@ export {
   RobinhoodRpcInvalidHexBytesError,
   RobinhoodRpcInvalidJsonError,
   RobinhoodRpcInvalidResultError,
+  RobinhoodRpcInvalidTopicError,
   RobinhoodRpcMalformedResponseError,
   RobinhoodRpcNetworkError,
   RobinhoodRpcTimeoutError,

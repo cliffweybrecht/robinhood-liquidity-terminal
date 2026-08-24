@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Address, Hex } from "viem";
 import { createVerifiedRobinhoodRpcClient, ROBINHOOD_CHAIN_ID } from "../client";
 import type { VerifiedRobinhoodRpcClient } from "../client";
 import {
@@ -10,6 +11,7 @@ import {
   RobinhoodRpcInvalidHexBytesError,
   RobinhoodRpcInvalidJsonError,
   RobinhoodRpcInvalidResultError,
+  RobinhoodRpcInvalidTopicError,
   RobinhoodRpcMalformedResponseError,
   RobinhoodRpcNetworkError,
   RobinhoodRpcTimeoutError,
@@ -18,10 +20,34 @@ import {
 
 const RPC_URL = "https://rpc.example.test";
 const VALID_ADDRESS = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
+const VALID_ADDRESS_2 = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 // A syntactically valid 32-byte value shaped like a Uniswap V4 PoolId —
 // deliberately NOT a valid 20-byte address.
 const POOL_ID_LIKE = "0x" + "ab".repeat(32);
 const CALLDATA = "0x70a082310000000000000000000000000d0601ce157db5bdc3162bbac2a2c8af5320d9ec";
+
+// getLogs fixtures. Topics/hashes are 32-byte hex — same shape as
+// POOL_ID_LIKE above, deliberately reused for consistency rather than
+// inventing an unrelated-looking value.
+const TOPIC_A = ("0x" + "aa".repeat(32)) as Hex;
+const TOPIC_B = ("0x" + "bb".repeat(32)) as Hex;
+const BLOCK_HASH = ("0x" + "cc".repeat(32)) as Hex;
+const TX_HASH = ("0x" + "dd".repeat(32)) as Hex;
+
+function rawLogEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    address: VALID_ADDRESS,
+    topics: [TOPIC_A, TOPIC_B],
+    data: "0x1234",
+    blockNumber: "0x2a",
+    blockHash: BLOCK_HASH,
+    transactionHash: TX_HASH,
+    transactionIndex: "0x1",
+    logIndex: "0x2",
+    removed: false,
+    ...overrides,
+  };
+}
 
 function requestBody(init?: RequestInit): { id: number; method: string; params: unknown[]; jsonrpc: string } {
   return JSON.parse(String(init?.body));
@@ -567,5 +593,386 @@ describe("createVerifiedRobinhoodRpcClient — configuration", () => {
       createVerifiedRobinhoodRpcClient({ rpcUrl: "", fetchImpl: fetchImpl as unknown as typeof fetch }),
     ).rejects.toThrow(RobinhoodRpcConfigError);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("client.getLogs (eth_getLogs) — success", () => {
+  it("returns a single valid log", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry()] });
+    const logs = await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toEqual({
+      address: VALID_ADDRESS,
+      topics: [TOPIC_A, TOPIC_B],
+      data: "0x1234",
+      blockNumber: 42n,
+      blockHash: BLOCK_HASH,
+      transactionHash: TX_HASH,
+      transactionIndex: 1,
+      logIndex: 2,
+      removed: false,
+    });
+  });
+
+  it("returns multiple valid logs, preserving order", async () => {
+    const rpc = await createTestClient({
+      eth_getLogs: () => [
+        rawLogEntry({ logIndex: "0x1" }),
+        rawLogEntry({ logIndex: "0x2" }),
+        rawLogEntry({ logIndex: "0x3" }),
+      ],
+    });
+    const logs = await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    expect(logs.map((l) => l.logIndex)).toEqual([1, 2, 3]);
+  });
+
+  it("returns an empty array for no matches, not null/undefined", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [] });
+    const logs = await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    expect(logs).toEqual([]);
+  });
+
+  it("sends a single address filter as-is", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    expect(calls[0]?.params[0]).toMatchObject({ address: VALID_ADDRESS });
+  });
+
+  it("sends an address-array filter as-is", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({
+      address: [VALID_ADDRESS, VALID_ADDRESS_2],
+      topics: [],
+      fromBlock: 0n,
+      toBlock: "latest",
+    });
+    expect(calls[0]?.params[0]).toMatchObject({ address: [VALID_ADDRESS, VALID_ADDRESS_2] });
+  });
+
+  it("sends a null wildcard topic as-is", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [null, TOPIC_A], fromBlock: 0n, toBlock: "latest" });
+    expect(calls[0]?.params[0]).toMatchObject({ topics: [null, TOPIC_A] });
+  });
+
+  it("sends an OR-topic array as-is", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [[TOPIC_A, TOPIC_B]], fromBlock: 0n, toBlock: "latest" });
+    expect(calls[0]?.params[0]).toMatchObject({ topics: [[TOPIC_A, TOPIC_B]] });
+  });
+
+  it("encodes explicit bigint fromBlock/toBlock as hex quantities", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 291n, toBlock: 4660n });
+    expect(calls[0]?.params[0]).toMatchObject({ fromBlock: "0x123", toBlock: "0x1234" });
+  });
+
+  it("supports the 'latest' named block tag for both fromBlock and toBlock", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: "latest", toBlock: "latest" });
+    expect(calls[0]?.params[0]).toMatchObject({ fromBlock: "latest", toBlock: "latest" });
+  });
+});
+
+describe("client.getLogs — input validation (before any network request)", () => {
+  it("rejects a malformed single address", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: "not-an-address" as Address, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidAddressError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a malformed address inside an address array", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({
+        address: [VALID_ADDRESS, "not-an-address"] as readonly Address[],
+        topics: [],
+        fromBlock: 0n,
+        toBlock: "latest",
+      }),
+    ).rejects.toThrow(RobinhoodRpcInvalidAddressError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an empty address array as ambiguous", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: [], topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidAddressError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a malformed standalone topic", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: ["0xnotatopic" as `0x${string}`], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidTopicError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a malformed topic inside an OR-array", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({
+        address: VALID_ADDRESS,
+        topics: [[TOPIC_A, "0xnotatopic" as `0x${string}`]],
+        fromBlock: 0n,
+        toBlock: "latest",
+      }),
+    ).rejects.toThrow(RobinhoodRpcInvalidTopicError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an empty OR-topic array as ambiguous (use null instead)", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [[]], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidTopicError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a negative explicit fromBlock", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: -1n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidBlockTagError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a negative explicit toBlock", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: -1n }),
+    ).rejects.toThrow(RobinhoodRpcInvalidBlockTagError);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an inverted range (fromBlock > toBlock) when both are explicit block numbers", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({}, calls);
+    calls.length = 0;
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 100n, toBlock: 50n }),
+    ).rejects.toThrow(RobinhoodRpcInvalidBlockTagError);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("client.getLogs — result validation (untrusted response)", () => {
+  it("fails when the top-level result is not an array", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => ({ not: "an array" }) });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a malformed log address", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ address: "not-an-address" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails when a log's topics field is not an array", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ topics: "not-an-array" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a malformed topic inside a returned log", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ topics: [TOPIC_A, "0xbad"] })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for malformed data (odd-length hex)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ data: "0x123" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a malformed blockNumber", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ blockNumber: "not-hex" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a null blockNumber (pending log — unsupported)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ blockNumber: null })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a null blockHash (pending log — unsupported)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ blockHash: null })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a malformed transactionHash", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ transactionHash: "0xbad" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a null transactionHash (pending log — unsupported)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ transactionHash: null })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a malformed logIndex", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ logIndex: "not-hex" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a null logIndex (pending log — unsupported)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ logIndex: null })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a null transactionIndex (pending log — unsupported)", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ transactionIndex: null })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a non-boolean removed field", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [rawLogEntry({ removed: "false" })] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails for a log entry missing required fields entirely", async () => {
+    const rpc = await createTestClient({ eth_getLogs: () => [{ address: VALID_ADDRESS }] });
+    await expect(
+      rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" }),
+    ).rejects.toThrow(RobinhoodRpcInvalidResultError);
+  });
+
+  it("fails the entire request when one entry among otherwise-valid multiple logs is malformed — never returns a partially-trusted array", async () => {
+    const rpc = await createTestClient({
+      eth_getLogs: () => [rawLogEntry({ logIndex: "0x1" }), rawLogEntry({ logIndex: "not-hex" }), rawLogEntry({ logIndex: "0x3" })],
+    });
+    let caught: unknown;
+    try {
+      await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RobinhoodRpcInvalidResultError);
+    expect((caught as RobinhoodRpcInvalidResultError).reason).toContain("index 1");
+  });
+});
+
+describe("client.getLogs — transport/JSON-RPC errors", () => {
+  it("surfaces a network failure as RobinhoodRpcNetworkError", async () => {
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = requestBody(init);
+      if (body.method === "eth_chainId") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x1237" }), { status: 200 });
+      }
+      throw new TypeError("fetch failed");
+    };
+    const rpc = await createVerifiedRobinhoodRpcClient({ rpcUrl: RPC_URL, fetchImpl });
+    let caught: unknown;
+    try {
+      await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RobinhoodRpcNetworkError);
+  });
+
+  it("surfaces a JSON-RPC error object as RobinhoodRpcErrorResponseError", async () => {
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = requestBody(init);
+      if (body.method === "eth_chainId") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x1237" }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32000, message: "query returned more than 10000 results" } }),
+        { status: 200 },
+      );
+    };
+    const rpc = await createVerifiedRobinhoodRpcClient({ rpcUrl: RPC_URL, fetchImpl });
+    let caught: unknown;
+    try {
+      await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RobinhoodRpcErrorResponseError);
+    expect((caught as RobinhoodRpcErrorResponseError).rpcCode).toBe(-32000);
+  });
+});
+
+describe("client.getLogs — trust boundary", () => {
+  it("does not perform another eth_chainId request when getLogs is called after construction", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: "latest" });
+    expect(calls.map((c) => c.method)).toEqual(["eth_getLogs"]);
+  });
+
+  it("issues exactly one eth_getLogs request per getLogs invocation — no pagination, no automatic retries", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [], fromBlock: 0n, toBlock: 1000n });
+    expect(calls.filter((c) => c.method === "eth_getLogs")).toHaveLength(1);
+  });
+
+  it("sends only generic JSON-RPC filter fields — no protocol/Uniswap-specific params leak into the request", async () => {
+    const calls: RecordedCall[] = [];
+    const rpc = await createTestClient({ eth_getLogs: () => [] }, calls);
+    calls.length = 0;
+    await rpc.getLogs({ address: VALID_ADDRESS, topics: [TOPIC_A], fromBlock: 0n, toBlock: "latest" });
+    expect(Object.keys(calls[0]?.params[0] as object).sort()).toEqual(["address", "fromBlock", "toBlock", "topics"]);
   });
 });
