@@ -10,14 +10,15 @@ import { UnknownProtocolDeploymentError } from "./errors";
  * this registry's addresses are used to *check*, so they can never be
  * each other's source of truth.
  */
-export type ProtocolDeploymentProtocol = "UNISWAP_V3";
-export type ProtocolDeploymentRole = "factory";
+export type ProtocolDeploymentProtocol = "UNISWAP_V3" | "UNISWAP_V4";
+export type ProtocolDeploymentRole = "factory" | "pool_manager";
 
 export interface ProtocolDeployment {
   readonly chainId: number;
   readonly protocol: ProtocolDeploymentProtocol;
   readonly role: ProtocolDeploymentRole;
   readonly address: Address;
+  readonly deploymentBlock?: bigint;
   /** Human-readable justification for why this address is trusted — never left as a bare unexplained constant. */
   readonly provenance: string;
 }
@@ -56,6 +57,15 @@ const DEPLOYMENTS: readonly ProtocolDeployment[] = [
     provenance:
       "Authoritative deployment research for Robinhood Chain (chainId 4663) — canonical Uniswap V3 UniswapV3Factory contract. See module doc comment above for how this address is used.",
   },
+  {
+    chainId: 4663,
+    protocol: "UNISWAP_V4",
+    role: "pool_manager",
+    address: getAddress("0x8366a39CC670B4001A1121B8F6A443A643e40951"),
+    deploymentBlock: 9070n,
+    provenance:
+      "Official Uniswap deployment metadata identifies the Robinhood Chain PoolManager; Robinhood Blockscout identifies its creation transaction/block 9070; direct Robinhood RPC block-header research cross-checked that deployment boundary.",
+  },
 ];
 
 /**
@@ -77,4 +87,12 @@ export function getProtocolDeploymentAddress(
     throw new UnknownProtocolDeploymentError(chainId, protocol, role);
   }
   return found.address;
+}
+
+export function getProtocolDeployment(
+  chainId: number, protocol: ProtocolDeploymentProtocol, role: ProtocolDeploymentRole,
+): ProtocolDeployment {
+  const found = DEPLOYMENTS.find((d) => d.chainId === chainId && d.protocol === protocol && d.role === role);
+  if (!found) throw new UnknownProtocolDeploymentError(chainId, protocol, role);
+  return found;
 }

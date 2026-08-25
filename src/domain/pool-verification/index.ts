@@ -6,6 +6,7 @@
 export { verifyPoolIdentity } from "./verify";
 export type { VerifyPoolIdentityInput } from "./verify";
 export type {
+  HistoricalPoolProvenance,
   PoolIdentityVerification,
   PoolVerificationEvidence,
   PoolVerificationEvidenceKind,
@@ -13,11 +14,12 @@ export type {
   PoolVerificationStatus,
 } from "./types";
 export {
+  MissingDeploymentBlockError,
   PoolClassificationMismatchError,
   PoolVerificationError,
   UnexpectedIdentifierShapeError,
   UnknownProtocolDeploymentError,
 } from "./errors";
 export type { PoolVerificationErrorCode } from "./errors";
-export { getProtocolDeploymentAddress } from "./deployments";
+export { getProtocolDeployment, getProtocolDeploymentAddress } from "./deployments";
 export type { ProtocolDeployment, ProtocolDeploymentProtocol, ProtocolDeploymentRole } from "./deployments";

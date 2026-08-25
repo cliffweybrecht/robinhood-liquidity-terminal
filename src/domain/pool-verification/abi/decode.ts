@@ -21,6 +21,18 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
  *    something the ABI encoding itself enforces. A value larger than
  *    `2^24 - 1` in that word is impossible for a real `uint24` and is
  *    treated as a decode failure, not silently accepted as a `bigint`.
+ *  - For `int24` returns: a signed Solidity integer smaller than 256
+ *    bits is ABI-encoded via full sign extension across the whole
+ *    32-byte word (every upper bit repeats the value's sign bit). This
+ *    module verifies that by reading the word as a signed 256-bit
+ *    two's-complement integer and rejecting anything outside the
+ *    genuine `int24` range (`-2^23` .. `2^23 - 1`) — a word that isn't a
+ *    faithfully sign-extended `int24` decodes to a value outside that
+ *    range and is treated as a decode failure. (viem's own
+ *    `decodeAbiParameters` decodes `int24` sign-extension correctly, but
+ *    this module hand-rolls it anyway for the same reason as `address`
+ *    above: untrusted wire data gets this module's own strict checks,
+ *    not a generic decoder's leniency, by policy.)
  *
  * Every function here returns `null` for anything that doesn't satisfy
  * every check — never throws, never returns a "best guess" value. `raw`
@@ -30,6 +42,10 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
 const WORD_HEX_LENGTH = 64; // 32 bytes * 2 hex chars per byte
 const ADDRESS_PADDING_HEX_LENGTH = 24; // 12 bytes * 2 hex chars per byte
 const UINT24_MAX = 0xffffffn; // 2^24 - 1
+const INT24_MIN = -8388608n; // -(2^23)
+const INT24_MAX = 8388607n; // 2^23 - 1
+const UINT256_SIGN_BIT = 1n << 255n;
+const UINT256_MODULUS = 1n << 256n;
 
 /** Decodes a single ABI `address` return value (e.g. `token0()`, `factory()`, `getPool(...)`). */
 export function decodeAddressReturn(raw: Hex): Address | null {
@@ -52,4 +68,15 @@ export function decodeUint24Return(raw: Hex): number | null {
   const value = BigInt(`0x${body}`);
   if (value < 0n || value > UINT24_MAX) return null;
   return Number(value);
+}
+
+/** Decodes a single ABI `int24` value (e.g. Uniswap V4's `Initialize.tickSpacing`). */
+export function decodeInt24Return(raw: Hex): number | null {
+  const body = raw.slice(2);
+  if (body.length !== WORD_HEX_LENGTH) return null;
+
+  const unsigned = BigInt(`0x${body}`);
+  const signed = unsigned >= UINT256_SIGN_BIT ? unsigned - UINT256_MODULUS : unsigned;
+  if (signed < INT24_MIN || signed > INT24_MAX) return null;
+  return Number(signed);
 }

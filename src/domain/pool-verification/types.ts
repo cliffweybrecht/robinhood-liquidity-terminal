@@ -1,3 +1,4 @@
+import type { Hex } from "viem";
 import type { ClassificationStatus, ClassifiedPoolIdentity, ProtocolFamily } from "@/domain/protocol";
 
 /**
@@ -56,7 +57,12 @@ export type PoolVerificationEvidenceKind =
   | "CANONICAL_ASSET_MATCH"
   | "TOKEN_PAIR_MATCH"
   | "CLASSIFICATION_UNSUPPORTED"
-  | "BLOCK_PIN_FAILURE";
+  | "BLOCK_PIN_FAILURE"
+  | "V4_INITIALIZE_EVENT_FOUND"
+  | "V4_INITIALIZE_EVENT_AMBIGUOUS"
+  | "V4_POOL_KEY_RECOVERED"
+  | "V4_POOL_ID_RECOMPUTED"
+  | "V4_CURRENCY_PAIR_MATCH";
 
 /**
  * One piece of structured, machine-readable evidence. `observed`/
@@ -89,11 +95,18 @@ export interface PoolVerificationEvidence {
  * read in this attempt was pinned to," not "the block verification
  * concluded successfully at."
  */
+export interface HistoricalPoolProvenance {
+  readonly blockNumber: bigint;
+  readonly transactionHash: Hex;
+  readonly logIndex: number;
+}
+
 export interface PoolIdentityVerification {
   readonly pool: ClassifiedPoolIdentity;
   readonly family: ProtocolFamily;
   readonly classificationStatus: ClassificationStatus;
   readonly status: PoolVerificationStatus;
   readonly blockNumber: bigint | null;
+  readonly historicalProvenance?: HistoricalPoolProvenance | null;
   readonly evidence: readonly PoolVerificationEvidence[];
 }

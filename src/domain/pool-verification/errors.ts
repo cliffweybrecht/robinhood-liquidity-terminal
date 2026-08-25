@@ -1,7 +1,8 @@
 export type PoolVerificationErrorCode =
   | "CLASSIFICATION_MISMATCH"
   | "UNEXPECTED_IDENTIFIER_SHAPE"
-  | "UNKNOWN_PROTOCOL_DEPLOYMENT";
+  | "UNKNOWN_PROTOCOL_DEPLOYMENT"
+  | "MISSING_DEPLOYMENT_BLOCK";
 
 export abstract class PoolVerificationError extends Error {
   abstract readonly code: PoolVerificationErrorCode;
@@ -32,14 +33,10 @@ export class PoolClassificationMismatchError extends PoolVerificationError {
 }
 
 /**
- * A `CLASSIFIED` `UNISWAP_V3` classification's pool had a `pairAddress`
- * that isn't a 20-byte address shape. Should be unreachable: Phase 6B's
- * `classifyPoolProtocol` only reaches `CLASSIFIED`/`UNISWAP_V3` when the
- * identifier shape is already confirmed `ADDRESS_20_BYTE` (a mismatch is
- * `CONFLICT`, not `CLASSIFIED`) — but this module re-checks the shape
- * itself before ever calling `getCode`, rather than trusting that
- * invariant, so a 32-byte PoolId can never reach an RPC call meant for a
- * 20-byte address.
+ * A `CLASSIFIED` protocol family reached verification with an identifier
+ * shape that is incompatible with that verifier. This is a defensive
+ * trust-boundary failure: the verifier refuses to coerce or route the
+ * identifier into address-only or PoolId-only RPC operations.
  */
 export class UnexpectedIdentifierShapeError extends PoolVerificationError {
   readonly code = "UNEXPECTED_IDENTIFIER_SHAPE" as const;
@@ -47,7 +44,7 @@ export class UnexpectedIdentifierShapeError extends PoolVerificationError {
 
   constructor(pairAddress: string) {
     super(
-      `pairAddress "${pairAddress}" is not a 20-byte address, but classification claimed CLASSIFIED/UNISWAP_V3 — refusing to call getCode/eth_call against a non-address identifier`,
+      `pairAddress "${pairAddress}" has an identifier shape incompatible with the classified protocol family — refusing protocol RPC calls`,
     );
     this.name = "UnexpectedIdentifierShapeError";
     this.pairAddress = pairAddress;
@@ -71,6 +68,31 @@ export class UnknownProtocolDeploymentError extends PoolVerificationError {
   constructor(chainId: number, protocol: string, role: string) {
     super(`No deployment configured for chainId=${chainId} protocol=${protocol} role=${role}`);
     this.name = "UnknownProtocolDeploymentError";
+    this.chainId = chainId;
+    this.protocol = protocol;
+    this.role = role;
+  }
+}
+
+/**
+ * A deployment is configured (see `UnknownProtocolDeploymentError`
+ * above for when it isn't) but is missing the `deploymentBlock` a
+ * historical-provenance strategy requires — e.g. Uniswap V4 identity
+ * verification, which needs a `fromBlock` to search from in order for
+ * "zero matching `Initialize` events" to be a complete, decisive search
+ * rather than an accidentally-partial one. Same "configuration problem,
+ * not a per-pool epistemic fact" reasoning as `UnknownProtocolDeploymentError`:
+ * thrown, not folded into a verification result.
+ */
+export class MissingDeploymentBlockError extends PoolVerificationError {
+  readonly code = "MISSING_DEPLOYMENT_BLOCK" as const;
+  readonly chainId: number;
+  readonly protocol: string;
+  readonly role: string;
+
+  constructor(chainId: number, protocol: string, role: string) {
+    super(`Deployment for chainId=${chainId} protocol=${protocol} role=${role} has no configured deploymentBlock`);
+    this.name = "MissingDeploymentBlockError";
     this.chainId = chainId;
     this.protocol = protocol;
     this.role = role;
