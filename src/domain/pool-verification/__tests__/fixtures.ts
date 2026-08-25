@@ -1,8 +1,9 @@
 import type { Address, Hex } from "viem";
 import type { LiquidityPool } from "@/domain/pool";
 import type { PoolProtocolClassification } from "@/domain/protocol";
-import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
+import type { EthGetLogsFilter, LogEntry, VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
 import { encodeFactoryCall, encodeFeeCall, encodeGetPoolCall, encodeToken0Call, encodeToken1Call } from "../abi/selectors";
+import { computeV4PoolId, V4_INITIALIZE_TOPIC0 } from "../abi/v4-events";
 
 // Real 20-byte address forms reused verbatim from earlier phases' test
 // fixtures (src/domain/pool/__tests__/, src/domain/protocol/__tests__/)
@@ -20,12 +21,111 @@ export const OTHER_POOL_ADDRESS = "0x1234567890123456789012345678901234567890" a
 export const FEE_TIER = 3000;
 export const DEFAULT_CODE: Hex = "0x6080604052348015600f57600080fd5b50";
 
+// The canonical Robinhood Chain Uniswap V4 PoolManager from deployments.ts,
+// duplicated here (not imported) for the same reason CANONICAL_FACTORY is
+// above: a test that accidentally breaks the real deployments.ts constant
+// should fail loudly, not silently compare against whatever it currently says.
+export const V4_POOL_MANAGER = "0x8366a39CC670B4001A1121B8F6A443A643e40951" as Address;
+export const V4_DEPLOYMENT_BLOCK = 9070n;
+export const V4_CURRENCY0 = NVDA;
+export const V4_CURRENCY1 = USDG;
+export const V4_FEE = FEE_TIER;
+export const V4_TICK_SPACING = 60;
+export const V4_HOOKS = "0x0000000000000000000000000000000000000000" as Address;
+export const V4_SQRT_PRICE_X96 = 1n << 96n;
+export const V4_TICK = 0;
+
 export function addressReturn(address: string): Hex {
   return `0x${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}` as Hex;
 }
 
 export function uint24Return(fee: number): Hex {
   return `0x${fee.toString(16).padStart(64, "0")}` as Hex;
+}
+
+/** Two's-complement-encodes a signed value into one 32-byte ABI word (e.g. `int24`), matching real ABI sign extension. */
+export function intWord(value: number | bigint): string {
+  const v = BigInt(value);
+  const unsigned = v < 0n ? v + (1n << 256n) : v;
+  return unsigned.toString(16).padStart(64, "0");
+}
+
+/** Encodes one unsigned value into one 32-byte ABI word (e.g. `uint160`). */
+export function uintWord(value: bigint): string {
+  return value.toString(16).padStart(64, "0");
+}
+
+/**
+ * Builds the ABI-encoded `Initialize` event `data` blob (fee, tickSpacing,
+ * hooks, sqrtPriceX96, tick — the 5 non-indexed fields) using plain word
+ * concatenation, deliberately not viem's `encodeAbiParameters` — this
+ * constructs raw wire-format test data independently of the production
+ * decode path, the same way a real node's `eth_getLogs` response would
+ * arrive.
+ */
+export function v4InitializeData(fields: {
+  fee?: number;
+  tickSpacing?: number;
+  hooks?: Address;
+  sqrtPriceX96?: bigint;
+  tick?: number;
+} = {}): Hex {
+  const fee = fields.fee ?? V4_FEE;
+  const tickSpacing = fields.tickSpacing ?? V4_TICK_SPACING;
+  const hooks = fields.hooks ?? V4_HOOKS;
+  const sqrtPriceX96 = fields.sqrtPriceX96 ?? V4_SQRT_PRICE_X96;
+  const tick = fields.tick ?? V4_TICK;
+  const feeWord = uintWord(BigInt(fee));
+  const tickSpacingWord = intWord(tickSpacing);
+  const hooksWord = addressReturn(hooks).slice(2);
+  const sqrtPriceWord = uintWord(sqrtPriceX96);
+  const tickWord = intWord(tick);
+  return `0x${feeWord}${tickSpacingWord}${hooksWord}${sqrtPriceWord}${tickWord}` as Hex;
+}
+
+/**
+ * The PoolId a `V4_CURRENCY0`/`V4_CURRENCY1`/`V4_FEE`/`V4_TICK_SPACING`/
+ * `V4_HOOKS` PoolKey recomputes to, via the same trusted-encode-direction
+ * helper `strategies/uniswap-v4.ts` itself uses (see `abi/v4-events.ts`'s
+ * doc comment for why that direction is safe to build with viem
+ * directly). Fixtures constructing self-consistent test data this way is
+ * distinct from a test *validating* that computation — the dedicated
+ * PoolId-vector test in `uniswap-v4.test.ts` independently cross-checks
+ * this value via manual word concatenation + `keccak256`, not by calling
+ * this same helper.
+ */
+export const V4_POOL_ID: Hex = computeV4PoolId({
+  currency0: V4_CURRENCY0,
+  currency1: V4_CURRENCY1,
+  fee: V4_FEE,
+  tickSpacing: V4_TICK_SPACING,
+  hooks: V4_HOOKS,
+});
+
+export const V4_BLOCK_NUMBER = 999888n;
+export const V4_HISTORICAL_BLOCK_NUMBER = 12345n;
+export const V4_TRANSACTION_HASH = "0xaaaabbbbccccddddeeeeffff00001111222233334444555566667777888899aa" as Hex;
+export const V4_BLOCK_HASH = "0x1111222233334444555566667777888899aaaabbbbccccddddeeeeffff0000" as Hex;
+
+/**
+ * Builds a fully valid, non-removed `PoolManager.Initialize` `LogEntry`
+ * for `V4_POOL_ID` by default — the happy-path VERIFIED log. Individual
+ * fields (`topics`, `data`, `removed`, provenance) can be overridden
+ * directly to construct every malformed/removed/mismatched test case.
+ */
+export function v4InitializeLog(overrides: Partial<LogEntry> = {}): LogEntry {
+  return {
+    address: V4_POOL_MANAGER,
+    topics: [V4_INITIALIZE_TOPIC0, V4_POOL_ID, addressReturn(V4_CURRENCY0), addressReturn(V4_CURRENCY1)],
+    data: v4InitializeData(),
+    blockNumber: V4_HISTORICAL_BLOCK_NUMBER,
+    blockHash: V4_BLOCK_HASH,
+    transactionHash: V4_TRANSACTION_HASH,
+    transactionIndex: 0,
+    logIndex: 0,
+    removed: false,
+    ...overrides,
+  };
 }
 
 export function pool(overrides: Partial<LiquidityPool> = {}): LiquidityPool {
@@ -94,6 +194,17 @@ export function classifiedPool(
   return { pool: p, classification };
 }
 
+/** Same as `classifiedPool`, but shaped as a CLASSIFIED UNISWAP_V4 pool: 32-byte `pairAddress` (`V4_POOL_ID`), `identifierShape: "ID_32_BYTE"`. */
+export function classifiedV4Pool(
+  poolOverrides: Partial<LiquidityPool> = {},
+  classificationOverrides: Partial<Omit<PoolProtocolClassification, "pool">> = {},
+): { pool: LiquidityPool; classification: PoolProtocolClassification } {
+  return classifiedPool(
+    { pairAddress: V4_POOL_ID, labels: ["v4"], ...poolOverrides },
+    { identifierShape: "ID_32_BYTE", family: "UNISWAP_V4", version: "v4", status: "CLASSIFIED", ...classificationOverrides },
+  );
+}
+
 export type RpcStub = Hex | (() => Promise<Hex>) | { error: unknown };
 
 function toFn(stub: RpcStub | undefined, fallback: Hex): () => Promise<Hex> {
@@ -107,6 +218,8 @@ function toFn(stub: RpcStub | undefined, fallback: Hex): () => Promise<Hex> {
   return async () => stub;
 }
 
+export type GetLogsStub = readonly LogEntry[] | (() => Promise<readonly LogEntry[]>) | { error: unknown };
+
 export interface FakeRpcStubs {
   readonly chainId?: number;
   readonly getBlockNumber?: (() => Promise<bigint>) | { error: unknown };
@@ -116,12 +229,14 @@ export interface FakeRpcStubs {
   readonly factory?: RpcStub;
   readonly fee?: RpcStub;
   readonly getPool?: RpcStub;
+  readonly getLogs?: GetLogsStub;
 }
 
 export interface FakeRpcCallLog {
   getBlockNumberCalls: number;
   getCodeCalls: Array<{ address: string; blockTag: unknown }>;
   callCalls: Array<{ to: string; data: string; blockTag: unknown }>;
+  getLogsCalls: EthGetLogsFilter[];
 }
 
 /**
@@ -133,7 +248,7 @@ export interface FakeRpcCallLog {
  * overrides only what it needs.
  */
 export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhoodRpcClient; calls: FakeRpcCallLog } {
-  const calls: FakeRpcCallLog = { getBlockNumberCalls: 0, getCodeCalls: [], callCalls: [] };
+  const calls: FakeRpcCallLog = { getBlockNumberCalls: 0, getCodeCalls: [], callCalls: [], getLogsCalls: [] };
 
   const codeFn = toFn(stubs.code, DEFAULT_CODE);
   const token0Fn = toFn(stubs.token0, addressReturn(NVDA));
@@ -173,11 +288,22 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       }
       throw new Error(`unstubbed fake RPC call: to=${request.to} data=${request.data}`);
     },
-    // Phase 6C.1 (Uniswap V3 identity verification) has no use for
-    // eth_getLogs — this stub exists only so the fake client satisfies
-    // VerifiedRobinhoodRpcClient's shape (Phase 6A.1 added getLogs).
-    getLogs: async () => {
-      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6C.1 V3 verification)");
+    // Uniswap V4 identity verification (Phase 6C.2) is the only strategy
+    // that calls eth_getLogs — every V4 test must stub `stubs.getLogs`
+    // explicitly (no fully-valid default the way code/token0/etc. have
+    // one, since a default log would only be valid for one specific
+    // PoolId/PoolKey combination). The call is always recorded before
+    // resolving/throwing, regardless of which stub shape was given.
+    getLogs: async (filter) => {
+      calls.getLogsCalls.push(filter);
+      const getLogsStub = stubs.getLogs;
+      if (getLogsStub === undefined) {
+        throw new Error("unstubbed fake RPC call: getLogs — pass stubs.getLogs");
+      }
+      if (typeof getLogsStub === "function") return getLogsStub();
+      if (Array.isArray(getLogsStub)) return getLogsStub;
+      if ("error" in getLogsStub) throw getLogsStub.error;
+      return getLogsStub;
     },
   };
 

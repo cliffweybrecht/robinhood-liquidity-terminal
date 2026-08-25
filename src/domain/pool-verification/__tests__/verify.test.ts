@@ -12,7 +12,6 @@ describe("verifyPoolIdentity — dispatch", () => {
     ["CONFLICT classification status", { status: "CONFLICT" as const }],
     ["OTHER_KNOWN family", { family: "OTHER_KNOWN" as const }],
     ["UNISWAP_V2_LIKE family", { family: "UNISWAP_V2_LIKE" as const }],
-    ["UNISWAP_V4 family", { family: "UNISWAP_V4" as const }],
     ["UNKNOWN family", { family: "UNKNOWN" as const }],
   ])("resolves UNSUPPORTED with zero RPC calls for %s", async (_label, override) => {
     const { pool, classification } = classifiedPool({}, override);
@@ -30,12 +29,12 @@ describe("verifyPoolIdentity — dispatch", () => {
   });
 
   it("preserves family/classificationStatus/pool identity on an UNSUPPORTED result", async () => {
-    const { pool, classification } = classifiedPool({}, { family: "UNISWAP_V4", status: "CLASSIFIED" });
+    const { pool, classification } = classifiedPool({}, { family: "OTHER_KNOWN", status: "CLASSIFIED" });
     const { rpc } = buildFakeRpc();
 
     const result = await verifyPoolIdentity({ pool, classification, rpc });
 
-    expect(result.family).toBe("UNISWAP_V4");
+    expect(result.family).toBe("OTHER_KNOWN");
     expect(result.classificationStatus).toBe("CLASSIFIED");
     expect(result.pool).toEqual({
       chainId: pool.chainId,
@@ -71,6 +70,18 @@ describe("verifyPoolIdentity — classification/pool consistency", () => {
     await expect(verifyPoolIdentity({ pool, classification: mismatched, rpc })).rejects.toThrow(
       PoolClassificationMismatchError,
     );
+  });
+
+
+  it("throws UnexpectedIdentifierShapeError for a CLASSIFIED UNISWAP_V4 pool with a 20-byte pairAddress, before any protocol RPC call", async () => {
+    const { pool, classification } = classifiedPool({}, { family: "UNISWAP_V4", status: "CLASSIFIED" });
+    const { rpc, calls } = buildFakeRpc();
+
+    await expect(verifyPoolIdentity({ pool, classification, rpc })).rejects.toThrow(UnexpectedIdentifierShapeError);
+    expect(calls.getBlockNumberCalls).toBe(0);
+    expect(calls.getCodeCalls).toHaveLength(0);
+    expect(calls.callCalls).toHaveLength(0);
+    expect(calls.getLogsCalls).toHaveLength(0);
   });
 
   it("throws UnexpectedIdentifierShapeError for a CLASSIFIED UNISWAP_V3 pool with a 32-byte pairAddress, and never sends it to getCode (defensive, unreachable via the real classifier)", async () => {

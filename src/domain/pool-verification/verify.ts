@@ -4,10 +4,11 @@ import { getPairIdentifierShape } from "@/domain/pool";
 import type { LiquidityPool } from "@/domain/pool";
 import type { ClassifiedPoolIdentity, PoolProtocolClassification } from "@/domain/protocol";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { getProtocolDeploymentAddress } from "./deployments";
-import { PoolClassificationMismatchError, UnexpectedIdentifierShapeError } from "./errors";
+import { getProtocolDeployment, getProtocolDeploymentAddress } from "./deployments";
+import { MissingDeploymentBlockError, PoolClassificationMismatchError, UnexpectedIdentifierShapeError } from "./errors";
 import { describeError } from "./read";
 import { verifyUniswapV3PoolIdentity } from "./strategies/uniswap-v3";
+import { verifyUniswapV4PoolIdentity } from "./strategies/uniswap-v4";
 import type { PoolIdentityVerification, PoolVerificationEvidence } from "./types";
 
 export interface VerifyPoolIdentityInput {
@@ -37,9 +38,9 @@ function unsupportedResult(
       support: "NEUTRAL",
       source: "Phase 6B classification",
       observed: `family=${classification.family} status=${classification.status}`,
-      expected: "family=UNISWAP_V3 status=CLASSIFIED",
+      expected: "family=UNISWAP_V3|UNISWAP_V4 status=CLASSIFIED",
       detail:
-        "Phase 6C.1 only verifies CLASSIFIED UNISWAP_V3 pools — no RPC call was made for this pool, to avoid probing its protocol from scratch.",
+        "Pool identity verification only probes supported CLASSIFIED protocol families — no RPC call was made for this unsupported classification.",
     },
   ];
   return {
@@ -63,10 +64,19 @@ function unsupportedResult(
  * is earned from `rpc` reads performed here, pinned to a single block.
  *
  * Dispatch is fail-closed: only `classification.status === "CLASSIFIED"`
- * with `classification.family === "UNISWAP_V3"` is attempted. Every
- * other combination resolves to `UNSUPPORTED` with **zero RPC calls** —
- * this module never probes an unsupported pool trying to infer its
- * protocol.
+ * with `classification.family` equal to `"UNISWAP_V3"` or `"UNISWAP_V4"`
+ * is attempted. Every other combination resolves to `UNSUPPORTED` with
+ * **zero RPC calls** — this module never probes an unsupported pool
+ * trying to infer its protocol.
+ *
+ * V3 and V4 use disjoint verification strategies because V4 has no
+ * per-pool contract to inspect (Uniswap V4 is a singleton `PoolManager`
+ * design — see `strategies/uniswap-v4.ts`): V3 identifies a pool by its
+ * own 20-byte contract address and reads that contract directly; V4
+ * identifies a pool by a 32-byte `PoolId` that is never an address and
+ * is proven instead from the `PoolManager`'s historical `Initialize`
+ * event log. V4 verification never calls `eth_getCode`/`eth_call` on
+ * `pairAddress` for exactly this reason.
  */
 export async function verifyPoolIdentity(input: VerifyPoolIdentityInput): Promise<PoolIdentityVerification> {
   const { pool, classification, rpc } = input;
@@ -80,8 +90,61 @@ export async function verifyPoolIdentity(input: VerifyPoolIdentityInput): Promis
 
   const identity = buildIdentitySnapshot(pool);
 
-  if (classification.status !== "CLASSIFIED" || classification.family !== "UNISWAP_V3") {
+  if (classification.status !== "CLASSIFIED" || !["UNISWAP_V3", "UNISWAP_V4"].includes(classification.family)) {
     return unsupportedResult(identity, classification);
+  }
+
+  if (classification.family === "UNISWAP_V4") {
+    // Fail closed on missing deployment configuration before spending
+    // any RPC round trip — see the comment on the V3 path below for why
+    // this throws instead of becoming part of the result.
+    const poolManager = getProtocolDeployment(rpc.chainId, "UNISWAP_V4", "pool_manager");
+    const deploymentBlock = poolManager.deploymentBlock;
+    if (deploymentBlock === undefined) {
+      throw new MissingDeploymentBlockError(rpc.chainId, "UNISWAP_V4", "pool_manager");
+    }
+
+    // Defensive re-check: a CLASSIFIED UNISWAP_V4 classification is only
+    // ever produced for a 32-byte PoolId (see classify.ts's
+    // expectedShapeFor), but this module never trusts that invariant
+    // blindly — see UnexpectedIdentifierShapeError's doc comment. This
+    // also guarantees `pool.pairAddress` is never routed into an
+    // address-only RPC field (`eth_getCode`/`eth_call`'s `to`).
+    if (getPairIdentifierShape(pool.pairAddress) !== "ID_32_BYTE") {
+      throw new UnexpectedIdentifierShapeError(pool.pairAddress);
+    }
+
+    let blockNumber: bigint;
+    try {
+      blockNumber = await rpc.getBlockNumber();
+    } catch (error) {
+      return {
+        pool: identity,
+        family: classification.family,
+        classificationStatus: classification.status,
+        status: "RPC_ERROR",
+        blockNumber: null,
+        historicalProvenance: null,
+        evidence: [
+          {
+            kind: "BLOCK_PIN_FAILURE",
+            support: "NEUTRAL",
+            source: "eth_blockNumber",
+            detail: `Could not pin a block for this verification attempt: ${describeError(error)}`,
+          },
+        ],
+      };
+    }
+
+    return verifyUniswapV4PoolIdentity({
+      pool,
+      identity,
+      classification,
+      rpc,
+      blockNumber,
+      poolId: pool.pairAddress,
+      poolManager: { ...poolManager, deploymentBlock },
+    });
   }
 
   // Fail closed on missing deployment configuration before spending any
