@@ -140,3 +140,38 @@ export function decodeSlot0Return(raw: Hex): Slot0Tuple | null {
 
   return { sqrtPriceX96, tick, observationIndex, observationCardinality, observationCardinalityNext, feeProtocol, unlocked };
 }
+
+/** The full `StateView.getSlot0(poolId)` return tuple (Uniswap V4) — a different, shorter shape than V3's 7-word `slot0()`; see `decodeSlot0V4Return`. */
+export interface Slot0V4Tuple {
+  readonly sqrtPriceX96: bigint;
+  readonly tick: number;
+  readonly protocolFee: number;
+  readonly lpFee: number;
+}
+
+const SLOT0_V4_WORD_COUNT = 4;
+const SLOT0_V4_HEX_LENGTH = 2 + WORD_HEX_LENGTH * SLOT0_V4_WORD_COUNT;
+
+/**
+ * Decodes and validates `StateView.getSlot0(poolId)`'s full 4-word
+ * return tuple: `(uint160 sqrtPriceX96, int24 tick, uint24 protocolFee,
+ * uint24 lpFee)`. Exact word count enforced (no truncated, no trailing
+ * data) — same discipline as `decodeSlot0Return` (V3's 7-word `slot0()`),
+ * just a different, independently-verified canonical Uniswap V4
+ * `StateView` shape, not a V3 tuple with fields removed.
+ */
+export function decodeSlot0V4Return(raw: Hex): Slot0V4Tuple | null {
+  const body = raw.slice(2);
+  if (body.length !== SLOT0_V4_HEX_LENGTH - 2) return null;
+
+  const sqrtPriceX96 = decodeUint160Return(slot0Word(raw, 0));
+  if (sqrtPriceX96 === null) return null;
+  const tick = decodeInt24Return(slot0Word(raw, 1));
+  if (tick === null) return null;
+  const protocolFee = decodeUint24Return(slot0Word(raw, 2));
+  if (protocolFee === null) return null;
+  const lpFee = decodeUint24Return(slot0Word(raw, 3));
+  if (lpFee === null) return null;
+
+  return { sqrtPriceX96, tick, protocolFee, lpFee };
+}

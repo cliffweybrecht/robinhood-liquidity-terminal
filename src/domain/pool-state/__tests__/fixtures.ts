@@ -2,7 +2,14 @@ import type { Address, Hex } from "viem";
 import type { LiquidityPool } from "@/domain/pool";
 import type { PoolIdentityVerification } from "@/domain/pool-verification";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { encodeFeeCall, encodeLiquidityCall, encodeSlot0Call, encodeTickSpacingCall } from "../abi/selectors";
+import {
+  encodeFeeCall,
+  encodeGetLiquidityCall,
+  encodeGetSlot0Call,
+  encodeLiquidityCall,
+  encodeSlot0Call,
+  encodeTickSpacingCall,
+} from "../abi/selectors";
 
 // Real 20-byte address forms reused verbatim from earlier phases' test
 // fixtures for consistency, not invented shapes. Deliberately duplicated
@@ -15,6 +22,14 @@ export const NVDA = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" as Address;
 export const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as Address;
 export const OTHER_POOL_ADDRESS = "0x1234567890123456789012345678901234567890" as Address;
 export const V4_POOL_ID = "0x401bc4b106c6deac5c66c251743efce2776a7eb0ce49d122d870308a4d209e43" as Hex;
+
+// The canonical Robinhood Chain Uniswap V4 StateView from the shared
+// pool-verification deployment registry, duplicated here (not imported)
+// for the same reason CANONICAL_FACTORY/V4_POOL_MANAGER are duplicated
+// in pool-verification's own test fixtures: a test that accidentally
+// breaks the real registry constant should fail loudly, not silently
+// compare against whatever it currently says.
+export const V4_STATE_VIEW = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b" as Address;
 
 export const IDENTITY_BLOCK = 11111n;
 export const STATE_BLOCK = 22222n;
@@ -96,6 +111,30 @@ export function oversizedWord(): string {
   return "f".repeat(64);
 }
 
+export const DEFAULT_PROTOCOL_FEE = 0;
+export const DEFAULT_LP_FEE = 3000;
+
+export interface Slot0V4Fields {
+  sqrtPriceX96: bigint;
+  tick: number;
+  protocolFee: number;
+  lpFee: number;
+}
+
+export const DEFAULT_SLOT0_V4: Slot0V4Fields = {
+  sqrtPriceX96: DEFAULT_SQRT_PRICE_X96,
+  tick: DEFAULT_TICK,
+  protocolFee: DEFAULT_PROTOCOL_FEE,
+  lpFee: DEFAULT_LP_FEE,
+};
+
+/** Builds a valid raw `StateView.getSlot0(poolId)` return (4 ABI words) from field overrides — a plain word-concatenation builder, independent of the production decoder it's used to test. */
+export function slot0V4Return(overrides: Partial<Slot0V4Fields> = {}): Hex {
+  const f = { ...DEFAULT_SLOT0_V4, ...overrides };
+  const words = [uintWord(f.sqrtPriceX96), intWord(f.tick), uintWord(BigInt(f.protocolFee)), uintWord(BigInt(f.lpFee))].join("");
+  return `0x${words}` as Hex;
+}
+
 export function pool(overrides: Partial<LiquidityPool> = {}): LiquidityPool {
   return {
     provider: "dexscreener",
@@ -162,6 +201,31 @@ export function verifiedV3Identity(
   return { pool: p, identity };
 }
 
+/** Same as `verifiedV3Identity`, but shaped as a `VERIFIED`/`UNISWAP_V4` identity: 32-byte `pairAddress` (`V4_POOL_ID`) by default. */
+export function verifiedV4Identity(
+  poolOverrides: Partial<LiquidityPool> = {},
+  identityOverrides: Partial<Omit<PoolIdentityVerification, "pool">> = {},
+): { pool: LiquidityPool; identity: PoolIdentityVerification } {
+  const p = pool({ pairAddress: V4_POOL_ID, labels: ["v4"], ...poolOverrides });
+  const identity: PoolIdentityVerification = {
+    pool: {
+      chainId: p.chainId,
+      pairAddress: p.pairAddress,
+      dexId: p.dexId,
+      canonicalAssetAddress: p.canonicalAssetAddress,
+      canonicalAssetSymbol: p.canonicalAssetSymbol,
+      canonicalAssetSide: p.canonicalAssetSide,
+    },
+    family: "UNISWAP_V4",
+    classificationStatus: "CLASSIFIED",
+    status: "VERIFIED",
+    blockNumber: IDENTITY_BLOCK,
+    evidence: [],
+    ...identityOverrides,
+  };
+  return { pool: p, identity };
+}
+
 export type RpcStub = Hex | (() => Promise<Hex>) | { error: unknown };
 
 function toFn(stub: RpcStub | undefined, fallback: Hex): () => Promise<Hex> {
@@ -182,6 +246,8 @@ export interface FakeRpcStubs {
   readonly liquidity?: RpcStub;
   readonly fee?: RpcStub;
   readonly tickSpacing?: RpcStub;
+  readonly slot0V4?: RpcStub;
+  readonly liquidityV4?: RpcStub;
 }
 
 export interface FakeRpcCallLog {
@@ -204,11 +270,15 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
   const liquidityFn = toFn(stubs.liquidity, liquidityReturn());
   const feeFn = toFn(stubs.fee, feeReturn());
   const tickSpacingFn = toFn(stubs.tickSpacing, tickSpacingReturn());
+  const slot0V4Fn = toFn(stubs.slot0V4, slot0V4Return());
+  const liquidityV4Fn = toFn(stubs.liquidityV4, liquidityReturn(DEFAULT_LIQUIDITY));
 
   const slot0Selector = encodeSlot0Call().slice(0, 10);
   const liquiditySelector = encodeLiquidityCall().slice(0, 10);
   const feeSelector = encodeFeeCall().slice(0, 10);
   const tickSpacingSelector = encodeTickSpacingCall().slice(0, 10);
+  const slot0V4Selector = encodeGetSlot0Call(V4_POOL_ID).slice(0, 10);
+  const liquidityV4Selector = encodeGetLiquidityCall(V4_POOL_ID).slice(0, 10);
 
   const rpc: VerifiedRobinhoodRpcClient = {
     chainId: stubs.chainId ?? 4663,
@@ -217,10 +287,12 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       if (stubs.getBlockNumber && typeof stubs.getBlockNumber !== "function") throw stubs.getBlockNumber.error;
       return stubs.getBlockNumber ? (stubs.getBlockNumber as () => Promise<bigint>)() : STATE_BLOCK;
     },
-    // Phase 6D.1 (current V3 state reads) has no use for eth_getCode —
-    // identity's contract-code check already happened in Phase 6C.1.
+    // Neither V3 nor V4 current-state reads (Phase 6D.1/6D.2) have any
+    // use for eth_getCode — identity's contract-code check already
+    // happened in Phase 6C.1, and V4 pools have no per-pool contract at
+    // all.
     getCode: async () => {
-      throw new Error("unstubbed fake RPC call: getCode (not used by Phase 6D.1 state reads)");
+      throw new Error("unstubbed fake RPC call: getCode (not used by pool-state reads)");
     },
     call: async (request, blockTag) => {
       calls.callCalls.push({ to: request.to, data: request.data, blockTag });
@@ -229,10 +301,12 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       if (selector === liquiditySelector) return liquidityFn();
       if (selector === feeSelector) return feeFn();
       if (selector === tickSpacingSelector) return tickSpacingFn();
+      if (selector === slot0V4Selector) return slot0V4Fn();
+      if (selector === liquidityV4Selector) return liquidityV4Fn();
       throw new Error(`unstubbed fake RPC call: to=${request.to} data=${request.data}`);
     },
     getLogs: async () => {
-      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6D.1 state reads)");
+      throw new Error("unstubbed fake RPC call: getLogs (not used by pool-state reads)");
     },
   };
 
