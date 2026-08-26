@@ -1,6 +1,6 @@
 import { getAddress, type Address, type Hex } from "viem";
 import type { LiquidityPool } from "@/domain/pool";
-import type { PoolIdentityVerification } from "@/domain/pool-verification";
+import type { PoolIdentityVerification, VerifiedV3PoolKey } from "@/domain/pool-verification";
 import { getProtocolDeploymentAddress } from "@/domain/pool-verification";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
 import { assembleQuoteAnalytics } from "./analytics";
@@ -109,18 +109,134 @@ export interface QuoteVerifiedUniswapV3ExactInputInput {
  * structurally and semantically valid `QUOTED` result (a real, if
  * uninteresting, answer), never downgraded — consistent with the frozen
  * "do not invent economic rejection thresholds" rule.
- *
- * Preconditions + block pin + the single canonical
- * `QuoterV2.quoteExactInputSingle` call — extracted (Phase 6E.2) into a
- * private, unexported core so `quoteVerifiedUniswapV3ExactInputWithAnalytics`
- * can reuse it byte-for-byte rather than duplicating any precondition or
- * revert-classification logic. `quoteVerifiedUniswapV3ExactInput` below
- * is a one-line wrapper around this function. Never exported from
- * `index.ts`.
  */
-async function runV3QuoteCore(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
+export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
   const { pool, identity, tokenIn, amountIn, rpc } = input;
 
+  const identityResolved = resolveV3Identity({ pool, identity });
+  if (amountIn <= 0n) {
+    throw new InvalidAmountInError(amountIn);
+  }
+  const direction = resolveV3TokenDirection(identityResolved.v3PoolKey, tokenIn);
+
+  const resolved: V3ResolvedQuoteInputs = {
+    identityVerificationBlock: identityResolved.identityVerificationBlock,
+    pairAddress: identityResolved.pairAddress,
+    quoterAddress: getProtocolDeploymentAddress(rpc.chainId, "UNISWAP_V3", "quoter"),
+    tokenIn: direction.tokenIn,
+    tokenOut: direction.tokenOut,
+    fee: direction.fee,
+  };
+
+  let quoteBlockNumber: bigint;
+  try {
+    quoteBlockNumber = await rpc.getBlockNumber();
+  } catch (error) {
+    return buildResult({
+      pool: identity.pool,
+      identityVerificationBlock: resolved.identityVerificationBlock,
+      quoteBlockNumber: null,
+      tokenIn: resolved.tokenIn,
+      tokenOut: resolved.tokenOut,
+      amountIn,
+      status: "RPC_ERROR",
+      evidence: [
+        {
+          kind: "BLOCK_PIN_FAILURE",
+          outcome: "rpc_error",
+          source: "eth_blockNumber",
+          detail: `Could not pin a block for this quote attempt: ${describeError(error)}`,
+        },
+      ],
+    });
+  }
+
+  const attempt = await quoteV3AtBlock(resolved, amountIn, quoteBlockNumber, rpc);
+
+  return buildResult({
+    pool: identity.pool,
+    identityVerificationBlock: resolved.identityVerificationBlock,
+    quoteBlockNumber,
+    tokenIn: resolved.tokenIn,
+    tokenOut: resolved.tokenOut,
+    amountIn,
+    status: attempt.status,
+    evidence: attempt.evidence,
+    amountOut: attempt.amountOut,
+    metadata: attempt.metadata,
+  });
+}
+
+/**
+ * Phase 6E.2 — same-block execution analytics for an exact-input quote
+ * through one already identity-VERIFIED Uniswap V3 pool. Runs the exact
+ * same precondition/block-pin/quoter-call path as
+ * `quoteVerifiedUniswapV3ExactInput` and, ONLY when that result is
+ * `QUOTED`, additionally reads `pool.slot0()` (pre-trade spot) and
+ * `decimals()` for both `tokenIn`/`tokenOut` — all pinned to the EXACT
+ * SAME `quoteBlockNumber`. No second `eth_blockNumber` call is ever
+ * made — see `assembleQuoteAnalytics` in `./analytics.ts`.
+ *
+ * A non-`QUOTED` result (including `RPC_ERROR`/`UNQUOTABLE`/
+ * `INDETERMINATE`) is returned completely unchanged, with no `analytics`
+ * field at all — there is no execution price to pair a spot reference
+ * with, and a valid `QUOTED` result is never downgraded because
+ * analytics could not be computed (the reverse also holds: analytics
+ * never rescues/upgrades a non-`QUOTED` result).
+ */
+export async function quoteVerifiedUniswapV3ExactInputWithAnalytics(
+  input: QuoteVerifiedUniswapV3ExactInputInput,
+): Promise<UniswapV3QuoteWithAnalytics> {
+  const result = await quoteVerifiedUniswapV3ExactInput(input);
+  if (result.status !== "QUOTED" || result.quoteBlockNumber === null || result.amountOut === undefined) {
+    return result;
+  }
+
+  const pairAddress = getAddress(result.pool.pairAddress);
+  const blockNumber = result.quoteBlockNumber;
+
+  const analytics = await assembleQuoteAnalytics({
+    rpc: input.rpc,
+    tokenIn: result.tokenIn,
+    tokenOut: result.tokenOut,
+    // V3 has no native-currency concept at the pool level — token0()/
+    // token1() can never be the zero address — so a V3 denomination is
+    // always ERC20, unconditionally. See analytics.ts's TokenDenomination
+    // doc comment.
+    tokenInDenomination: { kind: "ERC20", address: result.tokenIn },
+    tokenOutDenomination: { kind: "ERC20", address: result.tokenOut },
+    blockNumber,
+    tokenInIsToken0: result.tokenIn.toLowerCase() < result.tokenOut.toLowerCase(),
+    amountIn: result.amountIn,
+    amountOut: result.amountOut,
+    readSpotSqrtPriceX96: () => readV3SpotSqrtPriceX96(input.rpc, pairAddress, blockNumber),
+    spotEvidenceSource: "pool.slot0()",
+  });
+
+  return { ...result, analytics };
+}
+
+/**
+ * Phase 6F.1 — internal, unexported (from `index.ts`) shared primitives.
+ * Extracted so `read-uniswap-v3-depth-curve.ts` can reuse the EXACT same
+ * identity preconditions, token-direction derivation, and single-
+ * `amountIn` quoter-call/classify/decode logic as the single-quote
+ * functions above, byte-for-byte, rather than duplicating any of it.
+ * `resolveV3Identity`/`resolveV3TokenDirection`/`quoteV3AtBlock` are
+ * exported from THIS FILE (a normal named export other files in this
+ * module may import via a relative path) but are never re-exported from
+ * `pool-quote/index.ts` — no "quote at an arbitrary block" primitive is
+ * ever made public.
+ */
+export interface V3ResolvedIdentity {
+  readonly identityVerificationBlock: bigint;
+  readonly pairAddress: Address;
+  readonly v3PoolKey: VerifiedV3PoolKey;
+}
+
+/** Preconditions 1-5 only (pool/identity match, VERIFIED, UNISWAP_V3 family, non-null block, v3PoolKey present) — deliberately NOT including `amountIn`/`tokenIn` validation, so this single function can be shared by both a single-`amountIn` caller and an N-`amountIn` ladder caller, each of which validates its own amount(s) at its own point in its own precondition sequence. */
+export function resolveV3Identity(args: { pool: LiquidityPool; identity: PoolIdentityVerification }): V3ResolvedIdentity {
+  const { pool, identity } = args;
   if (identity.pool.chainId !== pool.chainId || identity.pool.pairAddress.toLowerCase() !== pool.pairAddress.toLowerCase()) {
     throw new PoolIdentityMismatchError(pool.pairAddress, identity.pool.pairAddress);
   }
@@ -137,10 +253,15 @@ async function runV3QuoteCore(input: QuoteVerifiedUniswapV3ExactInputInput): Pro
   if (v3PoolKey === null || v3PoolKey === undefined) {
     throw new MissingVerifiedV3PoolKeyError();
   }
-  if (amountIn <= 0n) {
-    throw new InvalidAmountInError(amountIn);
-  }
+  return {
+    identityVerificationBlock: identity.blockNumber,
+    pairAddress: getAddress(identity.pool.pairAddress),
+    v3PoolKey,
+  };
+}
 
+/** Precondition 7 alone: `tokenIn` must be one of the verified pair's two tokens; `tokenOut`/`fee` are derived exclusively from that same typed fact. Pure, no RPC. */
+export function resolveV3TokenDirection(v3PoolKey: VerifiedV3PoolKey, tokenIn: Address): { tokenIn: Address; tokenOut: Address; fee: number } {
   const token0Lower = v3PoolKey.token0.toLowerCase();
   const token1Lower = v3PoolKey.token1.toLowerCase();
   const tokenInLower = tokenIn.toLowerCase();
@@ -148,180 +269,104 @@ async function runV3QuoteCore(input: QuoteVerifiedUniswapV3ExactInputInput): Pro
     throw new InvalidTokenInError(tokenIn);
   }
   const tokenOut: Address = tokenInLower === token0Lower ? v3PoolKey.token1 : v3PoolKey.token0;
-  const fee = v3PoolKey.fee;
+  return { tokenIn, tokenOut, fee: v3PoolKey.fee };
+}
 
-  const identityVerificationBlock = identity.blockNumber;
-  const quoterAddress = getProtocolDeploymentAddress(rpc.chainId, "UNISWAP_V3", "quoter");
+export interface V3ResolvedQuoteInputs {
+  readonly identityVerificationBlock: bigint;
+  readonly pairAddress: Address;
+  readonly quoterAddress: Address;
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly fee: number;
+}
 
-  let quoteBlockNumber: bigint;
-  try {
-    quoteBlockNumber = await rpc.getBlockNumber();
-  } catch (error) {
-    return buildResult({
-      pool: identity.pool,
-      identityVerificationBlock,
-      quoteBlockNumber: null,
-      tokenIn,
-      tokenOut,
-      amountIn,
-      status: "RPC_ERROR",
-      evidence: [
-        {
-          kind: "BLOCK_PIN_FAILURE",
-          outcome: "rpc_error",
-          source: "eth_blockNumber",
-          detail: `Could not pin a block for this quote attempt: ${describeError(error)}`,
-        },
-      ],
-    });
-  }
+/** The outcome of one canonical `QuoterV2.quoteExactInputSingle` attempt for one `amountIn` at an already-pinned block — deliberately lean (no `pool`/`tokenIn`/`amountIn`/block fields — the caller already has those) so both the single-quote and depth-curve callers can wrap it into their own respective result shapes. */
+export interface V3QuoteAttemptOutcome {
+  readonly status: QuoteStatus;
+  readonly amountOut?: bigint;
+  readonly metadata?: UniswapV3QuoteMetadata;
+  readonly evidence: readonly QuoteEvidence[];
+}
 
-  const evidence: QuoteEvidence[] = [];
-
-  const quoteData = encodeQuoteExactInputSingleV3Call(tokenIn, tokenOut, amountIn, fee);
-  const outcome = await callQuoter(rpc, quoterAddress, quoteData, quoteBlockNumber);
+/**
+ * Performs exactly ONE canonical `QuoterV2.quoteExactInputSingle`
+ * `eth_call` for `amountIn` at the ALREADY-PINNED `blockNumber` — never
+ * pins its own block, never re-validates preconditions beyond what
+ * `resolved` already encodes. This is the exact tail end of the
+ * single-quote path above, factored out so a depth curve can call it N
+ * times (once per ladder point) at one shared block without
+ * duplicating the calldata-construction/classify/decode logic.
+ */
+export async function quoteV3AtBlock(
+  resolved: V3ResolvedQuoteInputs,
+  amountIn: bigint,
+  blockNumber: bigint,
+  rpc: VerifiedRobinhoodRpcClient,
+): Promise<V3QuoteAttemptOutcome> {
+  const quoteData = encodeQuoteExactInputSingleV3Call(resolved.tokenIn, resolved.tokenOut, amountIn, resolved.fee);
+  const outcome = await callQuoter(rpc, resolved.quoterAddress, quoteData, blockNumber);
 
   if (outcome.kind === "rpc_error") {
-    evidence.push({
-      kind: "QUOTE_CALL",
-      outcome: "rpc_error",
-      source: "QuoterV2.quoteExactInputSingle(...)",
-      detail: `RPC call failed: ${outcome.detail}`,
-    });
-    return buildResult({
-      pool: identity.pool,
-      identityVerificationBlock,
-      quoteBlockNumber,
-      tokenIn,
-      tokenOut,
-      amountIn,
+    return {
       status: "RPC_ERROR",
-      evidence,
-    });
+      evidence: [{ kind: "QUOTE_CALL", outcome: "rpc_error", source: "QuoterV2.quoteExactInputSingle(...)", detail: `RPC call failed: ${outcome.detail}` }],
+    };
   }
 
   if (outcome.kind === "revert") {
     const classification = classifyRevert("UNISWAP_V3", outcome.data);
-    evidence.push({
-      kind: "QUOTE_CALL",
-      outcome: classification.outcome === "unquotable" ? "unquotable" : "decode_error",
-      source: "QuoterV2.quoteExactInputSingle(...)",
-      detail: classification.reason,
-    });
-    return buildResult({
-      pool: identity.pool,
-      identityVerificationBlock,
-      quoteBlockNumber,
-      tokenIn,
-      tokenOut,
-      amountIn,
+    return {
       status: classification.outcome === "unquotable" ? "UNQUOTABLE" : "INDETERMINATE",
-      evidence,
-    });
+      evidence: [
+        {
+          kind: "QUOTE_CALL",
+          outcome: classification.outcome === "unquotable" ? "unquotable" : "decode_error",
+          source: "QuoterV2.quoteExactInputSingle(...)",
+          detail: classification.reason,
+        },
+      ],
+    };
   }
 
   const decoded = decodeV3QuoteReturn(outcome.raw);
   if (decoded === null) {
-    evidence.push({
-      kind: "QUOTE_CALL",
-      outcome: "decode_error",
-      source: "QuoterV2.quoteExactInputSingle(...)",
-      detail: `Return data could not be decoded into a valid 4-word quote tuple (raw: ${outcome.raw}).`,
-    });
-    return buildResult({
-      pool: identity.pool,
-      identityVerificationBlock,
-      quoteBlockNumber,
-      tokenIn,
-      tokenOut,
-      amountIn,
+    return {
       status: "INDETERMINATE",
-      evidence,
-    });
+      evidence: [
+        {
+          kind: "QUOTE_CALL",
+          outcome: "decode_error",
+          source: "QuoterV2.quoteExactInputSingle(...)",
+          detail: `Return data could not be decoded into a valid 4-word quote tuple (raw: ${outcome.raw}).`,
+        },
+      ],
+    };
   }
 
-  evidence.push({
-    kind: "QUOTE_CALL",
-    outcome: "ok",
-    source: "QuoterV2.quoteExactInputSingle(...)",
-    observed: `amountOut=${decoded.amountOut} sqrtPriceX96After=${decoded.sqrtPriceX96After} initializedTicksCrossed=${decoded.initializedTicksCrossed} gasEstimate=${decoded.gasEstimate}`,
-    detail:
-      "quoteExactInputSingle() decoded to a fully valid 4-word tuple. Economic quality (price movement, ticks crossed) does not affect this outcome.",
-  });
-
-  const metadata: UniswapV3QuoteMetadata = {
-    sqrtPriceX96After: decoded.sqrtPriceX96After,
-    initializedTicksCrossed: decoded.initializedTicksCrossed,
-    gasEstimate: decoded.gasEstimate,
-  };
-
-  return buildResult({
-    pool: identity.pool,
-    identityVerificationBlock,
-    quoteBlockNumber,
-    tokenIn,
-    tokenOut,
-    amountIn,
+  return {
     status: "QUOTED",
-    evidence,
     amountOut: decoded.amountOut,
-    metadata,
-  });
+    metadata: {
+      sqrtPriceX96After: decoded.sqrtPriceX96After,
+      initializedTicksCrossed: decoded.initializedTicksCrossed,
+      gasEstimate: decoded.gasEstimate,
+    },
+    evidence: [
+      {
+        kind: "QUOTE_CALL",
+        outcome: "ok",
+        source: "QuoterV2.quoteExactInputSingle(...)",
+        observed: `amountOut=${decoded.amountOut} sqrtPriceX96After=${decoded.sqrtPriceX96After} initializedTicksCrossed=${decoded.initializedTicksCrossed} gasEstimate=${decoded.gasEstimate}`,
+        detail:
+          "quoteExactInputSingle() decoded to a fully valid 4-word tuple. Economic quality (price movement, ticks crossed) does not affect this outcome.",
+      },
+    ],
+  };
 }
 
-/** See the module doc comment above `runV3QuoteCore` — this is an unchanged, behavior-preserving wrapper around it. */
-export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
-  return runV3QuoteCore(input);
-}
-
-/**
- * Phase 6E.2 — same-block execution analytics for an exact-input quote
- * through one already identity-VERIFIED Uniswap V3 pool. Runs the exact
- * same `runV3QuoteCore` as `quoteVerifiedUniswapV3ExactInput` (identical
- * preconditions, identical single `eth_blockNumber` pin, identical
- * `fee()`/`QuoterV2` calls) and, ONLY when that core result is `QUOTED`,
- * additionally reads `pool.slot0()` (pre-trade spot) and `decimals()`
- * for both `tokenIn`/`tokenOut` — all three pinned to the EXACT SAME
- * `quoteBlockNumber` the core already established, via the already-
- * returned result's own fields (`result.tokenIn`/`tokenOut`/`amountIn`/
- * `amountOut`/`quoteBlockNumber`/`pool.pairAddress`). No second
- * `eth_blockNumber` call is ever made — see `assembleQuoteAnalytics` in
- * `./analytics.ts` for the shared math/orchestration.
- *
- * A non-`QUOTED` core result (including `RPC_ERROR`/`UNQUOTABLE`/
- * `INDETERMINATE`) is returned completely unchanged, with no `analytics`
- * field at all — there is no execution price to pair a spot reference
- * with, and a valid `QUOTED` result is never downgraded because
- * analytics could not be computed (the reverse also holds: analytics
- * never rescues/upgrades a non-`QUOTED` result).
- */
-export async function quoteVerifiedUniswapV3ExactInputWithAnalytics(
-  input: QuoteVerifiedUniswapV3ExactInputInput,
-): Promise<UniswapV3QuoteWithAnalytics> {
-  const result = await runV3QuoteCore(input);
-  if (result.status !== "QUOTED" || result.quoteBlockNumber === null || result.amountOut === undefined) {
-    return result;
-  }
-
-  const pairAddress = getAddress(result.pool.pairAddress);
-  const blockNumber = result.quoteBlockNumber;
-
-  const analytics = await assembleQuoteAnalytics({
-    rpc: input.rpc,
-    tokenIn: result.tokenIn,
-    tokenOut: result.tokenOut,
-    blockNumber,
-    tokenInIsToken0: result.tokenIn.toLowerCase() < result.tokenOut.toLowerCase(),
-    amountIn: result.amountIn,
-    amountOut: result.amountOut,
-    readSpotSqrtPriceX96: () => readV3SpotSqrtPriceX96(input.rpc, pairAddress, blockNumber),
-    spotEvidenceSource: "pool.slot0()",
-  });
-
-  return { ...result, analytics };
-}
-
-async function readV3SpotSqrtPriceX96(
+/** Exported for `read-uniswap-v3-depth-curve.ts` to reuse — the same `slot0()` spot read `quoteVerifiedUniswapV3ExactInputWithAnalytics` already performs. */
+export async function readV3SpotSqrtPriceX96(
   rpc: VerifiedRobinhoodRpcClient,
   pairAddress: Address,
   blockNumber: bigint,
