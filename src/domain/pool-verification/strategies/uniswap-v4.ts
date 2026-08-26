@@ -5,7 +5,13 @@ import type { LogEntry, VerifiedRobinhoodRpcClient } from "@/providers/robinhood
 import { computeV4PoolId, decodeV4InitializeLog, V4_INITIALIZE_TOPIC0, type V4PoolKey } from "../abi/v4-events";
 import type { ProtocolDeployment } from "../deployments";
 import { describeError } from "../read";
-import type { HistoricalPoolProvenance, PoolIdentityVerification, PoolVerificationEvidence, PoolVerificationStatus } from "../types";
+import type {
+  HistoricalPoolProvenance,
+  PoolIdentityVerification,
+  PoolVerificationEvidence,
+  PoolVerificationStatus,
+  VerifiedV4PoolKey,
+} from "../types";
 
 export interface VerifyUniswapV4Args {
   readonly pool: LiquidityPool;
@@ -25,6 +31,7 @@ function result(
   status: PoolVerificationStatus,
   evidence: readonly PoolVerificationEvidence[],
   historicalProvenance: HistoricalPoolProvenance | null = null,
+  poolKey: VerifiedV4PoolKey | null = null,
 ): PoolIdentityVerification {
   return {
     pool: args.identity,
@@ -33,6 +40,11 @@ function result(
     status,
     blockNumber: args.blockNumber,
     historicalProvenance,
+    // Only a genuinely VERIFIED result exposes the PoolKey as trustworthy
+    // — a CONTRADICTED/INDETERMINATE/RPC_ERROR result never does, even if
+    // a PoolKey was structurally decoded along the way (see
+    // VerifiedV4PoolKey's doc comment in ../types.ts).
+    poolKey: status === "VERIFIED" ? poolKey : null,
     evidence,
   };
 }
@@ -215,5 +227,5 @@ export async function verifyUniswapV4PoolIdentity(args: VerifyUniswapV4Args): Pr
   });
 
   const status: PoolVerificationStatus = idMatches && pairMatches && canonicalPresent ? "VERIFIED" : "CONTRADICTED";
-  return result(args, status, evidence, historicalProvenance);
+  return result(args, status, evidence, historicalProvenance, key);
 }

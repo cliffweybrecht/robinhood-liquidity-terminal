@@ -12,6 +12,7 @@ export type {
   PoolVerificationEvidenceKind,
   PoolVerificationEvidenceSupport,
   PoolVerificationStatus,
+  VerifiedV4PoolKey,
 } from "./types";
 export {
   MissingDeploymentBlockError,

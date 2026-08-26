@@ -19,6 +19,28 @@ describe("getProtocolDeploymentAddress", () => {
     expect(deployment.provenance).toMatch(/0x8366a39CC670B4001A1121B8F6A443A643e40951/);
   });
 
+  it("resolves the canonical Robinhood Chain (4663) Uniswap V3 QuoterV2", () => {
+    const address = getProtocolDeploymentAddress(4663, "UNISWAP_V3", "quoter");
+    expect(address).toBe("0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7");
+  });
+
+  it("resolves the canonical Robinhood Chain (4663) Uniswap V4Quoter", () => {
+    const address = getProtocolDeploymentAddress(4663, "UNISWAP_V4", "quoter");
+    expect(address).toBe("0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94");
+  });
+
+  it("exposes V3 QuoterV2 provenance describing the independent factory() binding check", () => {
+    const deployment = getProtocolDeployment(4663, "UNISWAP_V3", "quoter");
+    expect(deployment.provenance).toMatch(/factory/);
+    expect(deployment.provenance).toMatch(/0x1f7d7550b1b028f7571e69a784071f0205fd2efa/);
+  });
+
+  it("exposes V4Quoter provenance describing the independent poolManager() binding check", () => {
+    const deployment = getProtocolDeployment(4663, "UNISWAP_V4", "quoter");
+    expect(deployment.provenance).toMatch(/poolManager/);
+    expect(deployment.provenance).toMatch(/0x8366a39CC670B4001A1121B8F6A443A643e40951/);
+  });
+
   it("throws UnknownProtocolDeploymentError for an unconfigured chainId", () => {
     expect(() => getProtocolDeploymentAddress(1, "UNISWAP_V3", "factory")).toThrow(UnknownProtocolDeploymentError);
   });
