@@ -14,8 +14,17 @@ export { quoteVerifiedUniswapV3ExactInputDepthCurve } from "./read-uniswap-v3-de
 export type { QuoteVerifiedUniswapV3ExactInputDepthCurveInput } from "./read-uniswap-v3-depth-curve";
 export { quoteVerifiedUniswapV4ExactInputDepthCurve } from "./read-uniswap-v4-depth-curve";
 export type { QuoteVerifiedUniswapV4ExactInputDepthCurveInput } from "./read-uniswap-v4-depth-curve";
+export { compareVerifiedPoolsExactInput } from "./compare-verified-pools";
+export type { ComparisonCandidateInput, CompareVerifiedPoolsExactInputInput } from "./compare-verified-pools";
 export { largestQuotedSample, sampledDepthAtBps } from "./depth-math";
 export type {
+  ComparisonCandidate,
+  ComparisonCandidateStatus,
+  ComparisonPreconditionFailure,
+  ComparisonPreconditionFailureCode,
+  CrossPoolComparisonBlockPinFailure,
+  CrossPoolComparisonResult,
+  CrossPoolComparisonSnapshot,
   DepthCurvePointLike,
   QuoteAnalytics,
   QuoteAnalyticsStatus,
@@ -25,11 +34,13 @@ export type {
   QuoteStatus,
   QuoteVerification,
   RationalValue,
+  UniswapV3ComparisonCandidate,
   UniswapV3DepthCurve,
   UniswapV3DepthCurvePoint,
   UniswapV3QuoteMetadata,
   UniswapV3QuoteVerification,
   UniswapV3QuoteWithAnalytics,
+  UniswapV4ComparisonCandidate,
   UniswapV4DepthCurve,
   UniswapV4DepthCurvePoint,
   UniswapV4QuoteMetadata,
@@ -37,16 +48,20 @@ export type {
   UniswapV4QuoteWithAnalytics,
 } from "./types";
 export {
+  DuplicateCandidateError,
   EmptyAmountsLadderError,
+  EmptyCandidatesError,
   IdentityNotVerifiedError,
   InvalidAmountInError,
   InvalidTokenInError,
+  MismatchedComparisonGroupError,
   MissingHookDataError,
   MissingIdentityBlockError,
   MissingVerifiedPoolKeyError,
   MissingVerifiedV3PoolKeyError,
   PoolIdentityMismatchError,
   QuotePreconditionError,
+  UnsupportedComparisonIdentityFamilyError,
   UnsupportedIdentityFamilyError,
 } from "./errors";
 export type { QuotePreconditionErrorCode } from "./errors";
