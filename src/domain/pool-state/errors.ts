@@ -1,13 +1,14 @@
 /**
- * Typed precondition failures for `readVerifiedUniswapV3PoolState`.
- * Deliberately a separate hierarchy from `pool-verification`'s
- * `PoolVerificationError` (not reused, not extended, not imported) — see
- * the module doc comment on `read-uniswap-v3-state.ts` for why identity
- * verification and state reading are kept as fully independent trust
- * boundaries, down to the type level. Every one of these is thrown
- * *before* any protocol state RPC call is made: a precondition failure
- * is a caller-usage/trust-boundary problem, never a per-pool epistemic
- * outcome, so it is never folded into `PoolStateVerification.status`.
+ * Typed precondition failures shared by `readVerifiedUniswapV3PoolState`
+ * and `readVerifiedUniswapV4PoolState`. Deliberately a separate
+ * hierarchy from `pool-verification`'s `PoolVerificationError` (not
+ * reused, not extended, not imported) — see the module doc comment on
+ * `read-uniswap-v3-state.ts` for why identity verification and state
+ * reading are kept as fully independent trust boundaries, down to the
+ * type level. Every one of these is thrown *before* any protocol state
+ * RPC call is made: a precondition failure is a caller-usage/trust-
+ * boundary problem, never a per-pool epistemic outcome, so it is never
+ * folded into `PoolStateVerification.status`.
  */
 export type PoolStateErrorCode =
   | "POOL_IDENTITY_MISMATCH"
@@ -35,7 +36,7 @@ export class PoolIdentityMismatchError extends PoolStateError {
 
   constructor(poolPairAddress: string, identityPairAddress: string) {
     super(
-      `identity.pool.pairAddress ("${identityPairAddress}") does not match pool.pairAddress ("${poolPairAddress}") — readVerifiedUniswapV3PoolState requires an identity proof produced from the same pool`,
+      `identity.pool.pairAddress ("${identityPairAddress}") does not match pool.pairAddress ("${poolPairAddress}") — current-state reads require an identity proof produced from the same pool`,
     );
     this.name = "PoolIdentityMismatchError";
     this.poolPairAddress = poolPairAddress;
@@ -55,15 +56,17 @@ export class IdentityNotVerifiedError extends PoolStateError {
   }
 }
 
-/** `identity.family !== "UNISWAP_V3"`. This module has no V4 (or other) state reader — see the module doc comment for why that's a deliberate scope boundary, not a missing dispatch branch. */
+/** `identity.family` doesn't match the protocol this specific reader function supports. Each reader (`readVerifiedUniswapV3PoolState`/`readVerifiedUniswapV4PoolState`) is protocol-specific by design — there is no generic multi-protocol dispatcher yet (see `types.ts`'s `PoolStateVerification` doc comment) — so passing a V4 identity to the V3 reader (or vice versa) is a caller-usage error, not a per-pool outcome. */
 export class UnsupportedIdentityFamilyError extends PoolStateError {
   readonly code = "UNSUPPORTED_IDENTITY_FAMILY" as const;
   readonly family: string;
+  readonly expectedFamily: string;
 
-  constructor(family: string) {
-    super(`identity.family is "${family}" — readVerifiedUniswapV3PoolState only supports UNISWAP_V3`);
+  constructor(family: string, expectedFamily: string) {
+    super(`identity.family is "${family}", not "${expectedFamily}" — this reader only supports ${expectedFamily}`);
     this.name = "UnsupportedIdentityFamilyError";
     this.family = family;
+    this.expectedFamily = expectedFamily;
   }
 }
 
@@ -77,14 +80,16 @@ export class MissingIdentityBlockError extends PoolStateError {
   }
 }
 
-/** `identity.pool.pairAddress` is not a 20-byte address. Defensive re-check, not a trust assumption — guarantees this module can never route a bytes32 PoolId into an address-only RPC field. */
+/** `identity.pool.pairAddress` doesn't have the identifier shape this reader requires (20-byte address for V3, 32-byte PoolId for V4). Defensive re-check, not a trust assumption on `identity.family`'s implied shape — guarantees the V3 reader can never route a bytes32 PoolId into an address-only RPC field, and the V4 reader can never mistake a 20-byte address for a PoolId. */
 export class UnexpectedPoolStateIdentifierShapeError extends PoolStateError {
   readonly code = "UNEXPECTED_IDENTIFIER_SHAPE" as const;
   readonly pairAddress: string;
+  readonly expectedShape: string;
 
-  constructor(pairAddress: string) {
-    super(`pairAddress "${pairAddress}" is not a 20-byte address — refusing to read Uniswap V3 pool state against a non-address identifier`);
+  constructor(pairAddress: string, expectedShape: string) {
+    super(`pairAddress "${pairAddress}" is not ${expectedShape} — refusing to read pool state against a mismatched identifier shape`);
     this.name = "UnexpectedPoolStateIdentifierShapeError";
     this.pairAddress = pairAddress;
+    this.expectedShape = expectedShape;
   }
 }

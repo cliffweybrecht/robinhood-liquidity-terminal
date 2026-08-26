@@ -49,3 +49,34 @@ export function encodeFeeCall(): Hex {
 export function encodeTickSpacingCall(): Hex {
   return encodeFunctionData({ abi: v3PoolStateAbi, functionName: "tickSpacing" });
 }
+
+/**
+ * `StateView` (Uniswap V4 periphery lens contract) ABI fragments.
+ * `PoolId` is a `bytes32`-underlying value type in v4-core — ABI-encodes
+ * as exactly one 32-byte word, so `{ type: "bytes32" }` here is exact,
+ * not an approximation.
+ */
+const v4StateViewAbi = [
+  {
+    type: "function",
+    name: "getSlot0",
+    stateMutability: "view",
+    inputs: [{ type: "bytes32" }],
+    outputs: [{ type: "uint160" }, { type: "int24" }, { type: "uint24" }, { type: "uint24" }],
+  },
+  {
+    type: "function",
+    name: "getLiquidity",
+    stateMutability: "view",
+    inputs: [{ type: "bytes32" }],
+    outputs: [{ type: "uint128" }],
+  },
+] as const;
+
+export function encodeGetSlot0Call(poolId: Hex): Hex {
+  return encodeFunctionData({ abi: v4StateViewAbi, functionName: "getSlot0", args: [poolId] });
+}
+
+export function encodeGetLiquidityCall(poolId: Hex): Hex {
+  return encodeFunctionData({ abi: v4StateViewAbi, functionName: "getLiquidity", args: [poolId] });
+}

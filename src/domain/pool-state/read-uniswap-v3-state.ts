@@ -12,7 +12,7 @@ import {
   UnsupportedIdentityFamilyError,
 } from "./errors";
 import { describeError, readFee, readLiquidity, readSlot0, readTickSpacing, type ReadResult } from "./read";
-import type { PoolStateEvidence, PoolStateStatus, PoolStateVerification, UniswapV3PoolState } from "./types";
+import type { PoolStateEvidence, PoolStateStatus, UniswapV3PoolState, UniswapV3PoolStateVerification } from "./types";
 
 export interface ReadVerifiedUniswapV3PoolStateInput {
   readonly pool: LiquidityPool;
@@ -70,7 +70,7 @@ function failureEvidence(
  * yields `INDETERMINATE` — see `types.ts` for why there is no
  * `CONTRADICTED`/`UNSUPPORTED` in this module's status model.
  */
-export async function readVerifiedUniswapV3PoolState(input: ReadVerifiedUniswapV3PoolStateInput): Promise<PoolStateVerification> {
+export async function readVerifiedUniswapV3PoolState(input: ReadVerifiedUniswapV3PoolStateInput): Promise<UniswapV3PoolStateVerification> {
   const { pool, identity, rpc } = input;
 
   if (identity.pool.chainId !== pool.chainId || identity.pool.pairAddress.toLowerCase() !== pool.pairAddress.toLowerCase()) {
@@ -80,13 +80,13 @@ export async function readVerifiedUniswapV3PoolState(input: ReadVerifiedUniswapV
     throw new IdentityNotVerifiedError(identity.status);
   }
   if (identity.family !== "UNISWAP_V3") {
-    throw new UnsupportedIdentityFamilyError(identity.family);
+    throw new UnsupportedIdentityFamilyError(identity.family, "UNISWAP_V3");
   }
   if (identity.blockNumber === null) {
     throw new MissingIdentityBlockError();
   }
   if (getPairIdentifierShape(identity.pool.pairAddress) !== "ADDRESS_20_BYTE") {
-    throw new UnexpectedPoolStateIdentifierShapeError(identity.pool.pairAddress);
+    throw new UnexpectedPoolStateIdentifierShapeError(identity.pool.pairAddress, "a 20-byte address");
   }
 
   const pairAddress = getAddress(identity.pool.pairAddress);

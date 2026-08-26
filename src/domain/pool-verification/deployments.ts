@@ -2,16 +2,23 @@ import { getAddress, type Address } from "viem";
 import { UnknownProtocolDeploymentError } from "./errors";
 
 /**
- * A specific known-good on-chain contract deployment that Phase 6C
- * verification code is allowed to trust as a comparison target.
- * Deliberately its own trust boundary, separate from Phase 6B's
- * classification and from any pool's own self-reported addresses (e.g.
- * a pool's `factory()` return): a pool's own reads are exactly what
- * this registry's addresses are used to *check*, so they can never be
- * each other's source of truth.
+ * A specific known-good on-chain contract deployment this codebase is
+ * allowed to trust as a comparison/entry-point target. Deliberately its
+ * own trust boundary, separate from Phase 6B's classification and from
+ * any pool's own self-reported addresses (e.g. a pool's `factory()`
+ * return): a pool's own reads are exactly what this registry's
+ * addresses are used to *check*, so they can never be each other's
+ * source of truth.
+ *
+ * Originally built for Phase 6C identity verification (`factory`/
+ * `pool_manager`); Phase 6D's state-reading layer (`src/domain/pool-state/`)
+ * also depends on this registry (`state_view`) rather than maintaining a
+ * second copy — this is a chain-level fact registry (`getProtocolDeployment`
+ * is public API, exported from this module's `index.ts`), not
+ * identity-verification-private state.
  */
 export type ProtocolDeploymentProtocol = "UNISWAP_V3" | "UNISWAP_V4";
-export type ProtocolDeploymentRole = "factory" | "pool_manager";
+export type ProtocolDeploymentRole = "factory" | "pool_manager" | "state_view";
 
 export interface ProtocolDeployment {
   readonly chainId: number;
@@ -65,6 +72,14 @@ const DEPLOYMENTS: readonly ProtocolDeployment[] = [
     deploymentBlock: 9070n,
     provenance:
       "Official Uniswap deployment metadata identifies the Robinhood Chain PoolManager; Robinhood Blockscout identifies its creation transaction/block 9070; direct Robinhood RPC block-header research cross-checked that deployment boundary.",
+  },
+  {
+    chainId: 4663,
+    protocol: "UNISWAP_V4",
+    role: "state_view",
+    address: getAddress("0xf3334192d15450cdd385c8b70e03f9a6bd9e673b"),
+    provenance:
+      "Official Uniswap v4-periphery StateView deployment for Robinhood Chain (chainId 4663). Independently verified live: eth_getCode at this address is non-empty and its dispatch table contains the getSlot0/getLiquidity/poolManager selectors; calling this contract's own immutable `poolManager()` getter returns exactly the canonical PoolManager address configured above (0x8366a39CC670B4001A1121B8F6A443A643e40951) — StateView's PoolManager reference is set once in its constructor and can never change, so this binding is verified here, once, rather than re-checked on every state read.",
   },
 ];
 

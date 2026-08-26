@@ -1,6 +1,14 @@
 import type { Address, Hex } from "viem";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { decodeInt24Return, decodeSlot0Return, decodeUint128Return, decodeUint24Return, type Slot0Tuple } from "./abi/decode";
+import {
+  decodeInt24Return,
+  decodeSlot0Return,
+  decodeSlot0V4Return,
+  decodeUint128Return,
+  decodeUint24Return,
+  type Slot0Tuple,
+  type Slot0V4Tuple,
+} from "./abi/decode";
 
 /**
  * The outcome of one `rpc.call(...)` plus its ABI decode — the same
@@ -52,4 +60,9 @@ export function readFee(rpc: VerifiedRobinhoodRpcClient, to: Address, data: Hex,
 
 export function readTickSpacing(rpc: VerifiedRobinhoodRpcClient, to: Address, data: Hex, blockNumber: bigint): Promise<ReadResult<number>> {
   return readCall(rpc, to, data, blockNumber, decodeInt24Return);
+}
+
+/** `readLiquidity` above is reused as-is for `StateView.getLiquidity` — same `uint128` decode, generic over `to`/`data`. */
+export function readSlot0V4(rpc: VerifiedRobinhoodRpcClient, to: Address, data: Hex, blockNumber: bigint): Promise<ReadResult<Slot0V4Tuple>> {
+  return readCall(rpc, to, data, blockNumber, decodeSlot0V4Return);
 }

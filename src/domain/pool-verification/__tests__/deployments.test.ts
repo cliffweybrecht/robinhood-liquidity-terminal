@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { getProtocolDeploymentAddress } from "../deployments";
+import { getProtocolDeployment, getProtocolDeploymentAddress } from "../deployments";
 import { UnknownProtocolDeploymentError } from "../errors";
 
 describe("getProtocolDeploymentAddress", () => {
   it("resolves the canonical Robinhood Chain (4663) Uniswap V3 factory", () => {
     const address = getProtocolDeploymentAddress(4663, "UNISWAP_V3", "factory");
     expect(address).toBe("0x1f7d7550B1b028f7571E69A784071F0205FD2EfA");
+  });
+
+  it("resolves the canonical Robinhood Chain (4663) Uniswap V4 StateView", () => {
+    const address = getProtocolDeploymentAddress(4663, "UNISWAP_V4", "state_view");
+    expect(address).toBe("0xF3334192D15450CdD385c8B70e03f9A6bD9E673b");
+  });
+
+  it("exposes StateView provenance describing the independent poolManager() binding check", () => {
+    const deployment = getProtocolDeployment(4663, "UNISWAP_V4", "state_view");
+    expect(deployment.provenance).toMatch(/poolManager/);
+    expect(deployment.provenance).toMatch(/0x8366a39CC670B4001A1121B8F6A443A643e40951/);
   });
 
   it("throws UnknownProtocolDeploymentError for an unconfigured chainId", () => {
