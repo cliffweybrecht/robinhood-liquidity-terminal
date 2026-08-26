@@ -18,7 +18,8 @@ export type QuotePreconditionErrorCode =
   | "INVALID_TOKEN_IN"
   | "MISSING_VERIFIED_POOL_KEY"
   | "MISSING_VERIFIED_V3_POOL_KEY"
-  | "MISSING_HOOK_DATA";
+  | "MISSING_HOOK_DATA"
+  | "EMPTY_AMOUNTS_LADDER";
 
 export abstract class QuotePreconditionError extends Error {
   abstract readonly code: QuotePreconditionErrorCode;
@@ -144,5 +145,15 @@ export class MissingHookDataError extends QuotePreconditionError {
     );
     this.name = "MissingHookDataError";
     this.hooks = hooks;
+  }
+}
+
+/** Phase 6F.1: `amountsIn` (the depth-curve ladder) has zero entries. A curve represents requested samples — at least one must be requested. Thrown before any RPC call, same as every other precondition in this module. */
+export class EmptyAmountsLadderError extends QuotePreconditionError {
+  readonly code = "EMPTY_AMOUNTS_LADDER" as const;
+
+  constructor() {
+    super("amountsIn must contain at least one entry — a depth curve with zero requested trade sizes is not a meaningful request");
+    this.name = "EmptyAmountsLadderError";
   }
 }

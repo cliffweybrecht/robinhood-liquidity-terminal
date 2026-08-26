@@ -349,6 +349,19 @@ export interface FakeRpcStubs {
   readonly slot0?: RpcStub;
   /** `decimals()` per token address (lowercased) — `decimals()`'s calldata is identical regardless of which token is called, so this MUST be routed by `to`, not by selector alone. Unset addresses fall back to `DEFAULT_DECIMALS_BY_ADDRESS`. */
   readonly decimalsByAddress?: Readonly<Record<string, RpcStub>>;
+  /**
+   * Per-`amountIn` overrides for a depth-curve ladder, keyed by
+   * `amountIn.toString()` — required because a single `v3Quote`/`v4Quote`
+   * stub cannot distinguish between the N different calls a depth curve
+   * makes (all share the identical 4-byte selector regardless of
+   * `amountIn`, since selectors depend only on the function signature).
+   * The `call` handler decodes the ACTUAL `amountIn` word out of each
+   * request's calldata and looks it up here; an amount with no entry
+   * falls back to `v3Quote`/`v4Quote` (if set) and then to the default
+   * return.
+   */
+  readonly v3QuoteByAmountIn?: Readonly<Record<string, RpcStub>>;
+  readonly v4QuoteByAmountIn?: Readonly<Record<string, RpcStub>>;
 }
 
 export interface FakeRpcCallLog {
@@ -390,8 +403,29 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       calls.callCalls.push({ to: request.to, data: request.data, blockTag });
       const selector = request.data.slice(0, 10);
       if (selector === feeSelector) return feeFn();
-      if (selector === v3QuoteSelector) return v3QuoteFn();
-      if (selector === v4QuoteSelector) return v4QuoteFn();
+      if (selector === v3QuoteSelector) {
+        // Word index 2 (0-indexed after the 4-byte selector) of the
+        // static (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+        // tuple is amountIn.
+        const amountInWord = request.data.slice(10 + 64 * 2, 10 + 64 * 3);
+        const amountIn = BigInt(`0x${amountInWord}`).toString();
+        const perAmountStub = stubs.v3QuoteByAmountIn?.[amountIn];
+        if (perAmountStub !== undefined) return toFn(perAmountStub, v3QuoteReturn())();
+        return v3QuoteFn();
+      }
+      if (selector === v4QuoteSelector) {
+        // Because `hookData` (the last field) is dynamic, the OUTER
+        // `params` tuple itself is dynamic, so the calldata starts with
+        // an extra offset word (word 0) before the tuple content begins.
+        // Confirmed empirically: word 0 = offset (0x20), words 1-5 =
+        // poolKey (5 static fields), word 6 = zeroForOne, word 7 =
+        // exactAmount, word 8 = offset-to-hookData.
+        const amountInWord = request.data.slice(10 + 64 * 7, 10 + 64 * 8);
+        const amountIn = BigInt(`0x${amountInWord}`).toString();
+        const perAmountStub = stubs.v4QuoteByAmountIn?.[amountIn];
+        if (perAmountStub !== undefined) return toFn(perAmountStub, v4QuoteReturn())();
+        return v4QuoteFn();
+      }
       // Same override (`stubs.slot0`) applies to whichever of the two a
       // given quote path actually calls — a V3 read never calls
       // `getSlot0`, a V4 read never calls `slot0`, so there is no real

@@ -1,5 +1,7 @@
+import { zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { computeExecutionPrice, computePriceImpactBps, computeSpotPrice } from "../analytics";
+import { computeExecutionPrice, computePriceImpactBps, computeSpotPrice, readSpotAndDecimals, type TokenDenomination } from "../analytics";
+import { buildFakeRpc, NVDA, QUOTE_BLOCK, USDG } from "./fixtures";
 
 const Q96 = 1n << 96n;
 
@@ -168,5 +170,73 @@ describe("computePriceImpactBps", () => {
     const execution = { numerator: 2n, denominator: 5n };
     const impact = computePriceImpactBps(spot, execution);
     expect(impact.denominator > 0n).toBe(true);
+  });
+});
+
+describe("readSpotAndDecimals — TokenDenomination trust boundary (generic analytics.ts cannot independently infer native ETH)", () => {
+  it("{ kind: 'V4_NATIVE_ETH' } resolves decimals=18 with NO eth_call at all — the ONLY way to reach this path", async () => {
+    const { rpc, calls } = buildFakeRpc();
+    const nativeDenom: TokenDenomination = { kind: "V4_NATIVE_ETH" };
+    const erc20Denom: TokenDenomination = { kind: "ERC20", address: USDG };
+
+    const shared = await readSpotAndDecimals({
+      rpc,
+      tokenIn: zeroAddress,
+      tokenOut: USDG,
+      tokenInDenomination: nativeDenom,
+      tokenOutDenomination: erc20Denom,
+      blockNumber: QUOTE_BLOCK,
+      tokenInIsToken0: true,
+      readSpotSqrtPriceX96: async () => ({ outcome: "ok", value: 1n << 96n }),
+      spotEvidenceSource: "test",
+    });
+
+    expect(shared.status).toBe("OK");
+    expect(shared.tokenInDecimals).toBe(18);
+    // No eth_call was EVER sent to the zero address.
+    expect(calls.callCalls.some((c) => c.to.toLowerCase() === zeroAddress)).toBe(false);
+  });
+
+  it("{ kind: 'ERC20', address: zeroAddress } is treated as an ORDINARY ERC20 address — a real eth_call IS attempted, proving the address value alone (even the zero address) NEVER triggers the native shortcut; only the explicit 'V4_NATIVE_ETH' tag does", async () => {
+    const { rpc, calls } = buildFakeRpc();
+    const erc20ZeroDenom: TokenDenomination = { kind: "ERC20", address: zeroAddress };
+    const erc20Denom: TokenDenomination = { kind: "ERC20", address: NVDA };
+
+    await readSpotAndDecimals({
+      rpc,
+      tokenIn: zeroAddress,
+      tokenOut: NVDA,
+      tokenInDenomination: erc20ZeroDenom,
+      tokenOutDenomination: erc20Denom,
+      blockNumber: QUOTE_BLOCK,
+      tokenInIsToken0: true,
+      readSpotSqrtPriceX96: async () => ({ outcome: "ok", value: 1n << 96n }),
+      spotEvidenceSource: "test",
+    });
+
+    // A real eth_call attempt WAS made to the zero address — no
+    // special-casing anywhere in this generic function based on the
+    // address value itself.
+    expect(calls.callCalls.some((c) => c.to.toLowerCase() === zeroAddress)).toBe(true);
+  });
+
+  it("ordinary ERC20/ERC20 denominations both require real decimals() reads", async () => {
+    const { rpc, calls } = buildFakeRpc();
+
+    const shared = await readSpotAndDecimals({
+      rpc,
+      tokenIn: NVDA,
+      tokenOut: USDG,
+      tokenInDenomination: { kind: "ERC20", address: NVDA },
+      tokenOutDenomination: { kind: "ERC20", address: USDG },
+      blockNumber: QUOTE_BLOCK,
+      tokenInIsToken0: false,
+      readSpotSqrtPriceX96: async () => ({ outcome: "ok", value: 1n << 96n }),
+      spotEvidenceSource: "test",
+    });
+
+    expect(shared.status).toBe("OK");
+    expect(calls.callCalls.some((c) => c.to.toLowerCase() === NVDA.toLowerCase())).toBe(true);
+    expect(calls.callCalls.some((c) => c.to.toLowerCase() === USDG.toLowerCase())).toBe(true);
   });
 });

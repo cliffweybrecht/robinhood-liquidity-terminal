@@ -219,3 +219,107 @@ export interface UniswapV3QuoteWithAnalytics extends UniswapV3QuoteVerification 
 export interface UniswapV4QuoteWithAnalytics extends UniswapV4QuoteVerification {
   readonly analytics?: QuoteAnalytics;
 }
+
+/**
+ * Phase 6F.1 — one sampled point of a same-block executable-depth curve.
+ * Deliberately independent of every sibling point: one point's
+ * `status`/`amountOut`/failure has no bearing on any other point's own
+ * result (see `quoteVerifiedUniswapV3ExactInputDepthCurve`'s doc comment
+ * for why). `executionPrice`/`priceImpactBps` are computed from the
+ * curve's ONE shared `spotPrice` (see `DepthCurve`'s doc comment) — never
+ * from a per-point spot read — and are present only when BOTH this point
+ * is `QUOTED` AND the shared spot/decimals read succeeded; a shared-read
+ * failure never blanks out this point's own `amountOut`.
+ */
+interface DepthCurvePointBase {
+  readonly amountIn: bigint;
+  readonly status: QuoteStatus;
+  /** Present only when `status === "QUOTED"`. */
+  readonly amountOut?: bigint;
+  /** Present only when `status === "QUOTED"` AND the curve's shared spot/decimals read succeeded. */
+  readonly executionPrice?: RationalValue;
+  /** Present only when `status === "QUOTED"` AND the curve's shared spot/decimals read succeeded. Signed — see `QuoteAnalytics.priceImpactBps`'s doc comment; identical semantics apply per point. */
+  readonly priceImpactBps?: RationalValue;
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/** One sampled point of a V3 depth curve. `metadata` (when present) is always `UniswapV3QuoteMetadata`. */
+export interface UniswapV3DepthCurvePoint extends DepthCurvePointBase {
+  /** Present only when `status === "QUOTED"`. */
+  readonly metadata?: UniswapV3QuoteMetadata;
+}
+
+/** One sampled point of a V4 depth curve. `metadata` (when present) is always `UniswapV4QuoteMetadata`. */
+export interface UniswapV4DepthCurvePoint extends DepthCurvePointBase {
+  /** Present only when `status === "QUOTED"`. */
+  readonly metadata?: UniswapV4QuoteMetadata;
+}
+
+/**
+ * Minimal structural shape both `UniswapV3DepthCurvePoint` and
+ * `UniswapV4DepthCurvePoint` already satisfy — lets the pure
+ * threshold-derivation helpers (`largestQuotedSample`/
+ * `sampledDepthAtBps`, see `depth-math.ts`) accept either protocol's
+ * point array without a generic dispatcher or duplicated per-protocol
+ * helper functions.
+ */
+export interface DepthCurvePointLike {
+  readonly amountIn: bigint;
+  readonly status: QuoteStatus;
+  readonly priceImpactBps?: RationalValue;
+}
+
+/**
+ * Phase 6F.1 — a same-block executable-depth curve for ONE already
+ * identity-VERIFIED pool across a caller-supplied ladder of exact-input
+ * `amountIn` samples. Represents ONE chain state: `blockNumber` is
+ * pinned via exactly one `eth_blockNumber` call, and every quoter
+ * simulation AND the shared spot/decimals read all use that identical
+ * block — never a per-point block, never independently pinned.
+ *
+ * `spotStatus`/`spotPrice`/`tokenInDecimals`/`tokenOutDecimals` reflect
+ * the curve's ONE shared spot+decimals read (`analytics.ts`'s
+ * `readSpotAndDecimals`, called exactly once) — completely independent
+ * of any individual point's own `status`. A shared-read failure
+ * (`spotStatus !== "OK"`) means `executionPrice`/`priceImpactBps` are
+ * unavailable on every point, but does NOT invalidate any point's own
+ * `status`/`amountOut` — those come exclusively from that point's own
+ * canonical quoter `eth_call`, which is a completely separate concern
+ * from whether the shared analytics context happened to succeed. This
+ * is Phase 6E.2's "a valid QUOTED result is never downgraded because
+ * analytics failed" principle, applied at curve granularity.
+ *
+ * `blockNumber === null` only if the single shared `eth_blockNumber`
+ * call itself failed — in that case `points` is empty (nothing could be
+ * attempted without a pinned block) and `spotStatus` is `"RPC_ERROR"`.
+ */
+interface DepthCurveBase {
+  readonly pool: ClassifiedPoolIdentity;
+  readonly identityVerificationBlock: bigint;
+  readonly blockNumber: bigint | null;
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  /** Present only when `spotStatus === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `spotStatus === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  /** Present only when `spotStatus === "OK"`. Same-block pre-trade pool spot price, `tokenOut` per `tokenIn`. */
+  readonly spotPrice?: RationalValue;
+  readonly spotStatus: QuoteAnalyticsStatus;
+  /** Evidence for the shared, once-per-curve concerns: block pinning and/or the shared spot+decimals read. Never per-point evidence — see each point's own `evidence` for that. */
+  readonly spotEvidence: readonly QuoteEvidence[];
+}
+
+/** The result of `quoteVerifiedUniswapV3ExactInputDepthCurve`. */
+export interface UniswapV3DepthCurve extends DepthCurveBase {
+  readonly family: "UNISWAP_V3";
+  readonly points: readonly UniswapV3DepthCurvePoint[];
+}
+
+/** The result of `quoteVerifiedUniswapV4ExactInputDepthCurve`. */
+export interface UniswapV4DepthCurve extends DepthCurveBase {
+  readonly family: "UNISWAP_V4";
+  readonly points: readonly UniswapV4DepthCurvePoint[];
+  /** `true` only when the caller explicitly supplied `hookData` for a hooked pool — applies to every point in the curve (one hook, one hookData value, for the whole ladder). Never claims caller-supplied `hookData` is itself verified — see the `HOOK_DATA_DISCLOSURE` entry in `spotEvidence` (a curve-level, once-per-curve disclosure, not per-point, since the same `hookData` value is used for every sampled point). */
+  readonly hookDataCallerSupplied?: boolean;
+}

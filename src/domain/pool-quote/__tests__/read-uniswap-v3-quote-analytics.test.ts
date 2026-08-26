@@ -1,4 +1,5 @@
 import type { Hex } from "viem";
+import { zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
 import { computeSpotPrice } from "../analytics";
 import { quoteVerifiedUniswapV3ExactInputWithAnalytics } from "../read-uniswap-v3-quote";
@@ -240,6 +241,31 @@ describe("quoteVerifiedUniswapV3ExactInputWithAnalytics — non-QUOTED base resu
 
     expect(result.status).toBe("RPC_ERROR");
     expect(result.analytics).toBeUndefined();
+  });
+});
+
+describe("quoteVerifiedUniswapV3ExactInputWithAnalytics — V3 cannot produce a native-ETH denomination", () => {
+  it("caller-supplied LiquidityPool metadata claiming a zero-address token does NOT trigger native (18/no-eth_call) decimals handling — V3 always resolves ERC20 denominations from the verified v3PoolKey, real decimals() calls are still made for both sides", async () => {
+    const { pool: genuinePool, identity } = verifiedV3Identity();
+    const spoofedPool = { ...genuinePool, baseToken: { address: zeroAddress, name: "fake native", symbol: "ETH" } };
+    const { rpc, calls } = buildFakeRpc();
+
+    const result = await quoteVerifiedUniswapV3ExactInputWithAnalytics({ pool: spoofedPool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc });
+
+    expect(result.status).toBe("QUOTED");
+    expect(result.analytics?.status).toBe("OK");
+    expect(result.analytics?.tokenInDecimals).toBe(DEFAULT_DECIMALS_BY_ADDRESS[NVDA.toLowerCase()]);
+    expect(result.analytics?.tokenOutDecimals).toBe(DEFAULT_DECIMALS_BY_ADDRESS[USDG.toLowerCase()]);
+    // No eth_call was ever sent to the zero address — the spoofed
+    // metadata's zeroAddress value is never read by the V3 path at all,
+    // since tokenIn/tokenOut/decimals are derived exclusively from
+    // identity.v3PoolKey (typed ERC20 addresses only) and the caller's
+    // own explicit `tokenIn` parameter — never from `pool.baseToken`/
+    // `quoteToken`. V3 structurally can only ever construct
+    // `{ kind: "ERC20", address }` denominations — see analytics.ts's
+    // TokenDenomination doc comment and read-uniswap-v3-quote.ts's
+    // WithAnalytics call site.
+    expect(calls.callCalls.some((c) => c.to.toLowerCase() === zeroAddress)).toBe(false);
   });
 });
 
