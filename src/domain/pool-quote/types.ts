@@ -1,4 +1,4 @@
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import type { ClassifiedPoolIdentity } from "@/domain/protocol";
 
 /**
@@ -323,3 +323,207 @@ export interface UniswapV4DepthCurve extends DepthCurveBase {
   /** `true` only when the caller explicitly supplied `hookData` for a hooked pool — applies to every point in the curve (one hook, one hookData value, for the whole ladder). Never claims caller-supplied `hookData` is itself verified — see the `HOOK_DATA_DISCLOSURE` entry in `spotEvidence` (a curve-level, once-per-curve disclosure, not per-point, since the same `hookData` value is used for every sampled point). */
   readonly hookDataCallerSupplied?: boolean;
 }
+
+/**
+ * Phase 6F.2 — a single candidate's status within one same-block
+ * cross-pool comparison. A strict superset of `QuoteStatus`: every
+ * existing quote outcome (`QUOTED`/`UNQUOTABLE`/`INDETERMINATE`/
+ * `RPC_ERROR`) means exactly what it already means in the single-quote/
+ * depth-curve readers — this adds exactly ONE new, comparison-specific
+ * outcome:
+ *
+ *  - `PRECONDITION_FAILED`: a well-understood, per-candidate structural
+ *    precondition could not be satisfied for THIS candidate specifically
+ *    — currently either a hooked V4 candidate with no caller-supplied
+ *    `hookData`, or a V4 candidate whose shared `amountIn` exceeds the
+ *    protocol's own `uint128` representable range (see
+ *    `ComparisonPreconditionFailure`) — so NO canonical quoter
+ *    simulation and NO spot read were ever attempted for this candidate.
+ *    This is deliberately NOT folded into `INDETERMINATE`:
+ *    `INDETERMINATE` means "a read/call was attempted and its outcome
+ *    could not be classified"; `PRECONDITION_FAILED` means "no attempt
+ *    was made at all, for a precisely known reason" — collapsing the two
+ *    would hide a real, actionable, typed reason behind a vaguer status.
+ *    Deliberately NOT added to `QuoteStatus` itself — every existing
+ *    single-quote/depth-curve consumer of `QuoteStatus` continues to see
+ *    exactly the four values it always has; this is additive, scoped
+ *    only to the comparison result shape.
+ *
+ *    Both reasons share the same underlying principle: a fact that is
+ *    GLOBALLY invalid for the whole comparison (`amountIn <= 0`, an
+ *    unVERIFIED identity, a mismatched comparable group, ...) aborts the
+ *    whole request before any RPC call, via a thrown
+ *    `QuotePreconditionError`; a fact that is valid for the comparison
+ *    as a whole but that ONE candidate's specific protocol cannot
+ *    represent (a hook needing undisclosed `hookData`; an `amountIn`
+ *    that is positive and perfectly valid for a V3 sibling but exceeds
+ *    V4's own `uint128` `exactAmount` bound) becomes that candidate's
+ *    own `PRECONDITION_FAILED` result instead — never the other's
+ *    siblings' problem.
+ */
+export type ComparisonCandidateStatus = QuoteStatus | "PRECONDITION_FAILED";
+
+export type ComparisonPreconditionFailureCode = "MISSING_HOOK_DATA" | "AMOUNT_IN_EXCEEDS_V4_BOUND";
+
+/** Present on a candidate only when `status === "PRECONDITION_FAILED"`. `code` is machine-readable; `detail` explains precisely why — for `"MISSING_HOOK_DATA"`, the underlying `MissingHookDataError`'s own message; for `"AMOUNT_IN_EXCEEDS_V4_BOUND"`, a message stating the comparison's shared `amountIn` and V4's `uint128` bound — never a generic re-wording. */
+export interface ComparisonPreconditionFailure {
+  readonly code: ComparisonPreconditionFailureCode;
+  readonly detail: string;
+}
+
+/**
+ * One candidate's result within a `CrossPoolComparisonSnapshot`.
+ * Deliberately independent of every sibling candidate — one candidate's
+ * `status`/failure has no bearing on any other candidate's own result,
+ * exactly matching `DepthCurvePoint`'s point-independence principle,
+ * now applied at pool granularity instead of amountIn granularity.
+ *
+ * `analyticsStatus` reflects ONLY this candidate's OWN same-block spot
+ * read (`V3 slot0()` / `V4 StateView.getSlot0`) — never the comparison's
+ * shared decimals resolution (see `CrossPoolComparisonSnapshot.
+ * sharedAnalyticsStatus` for that, a completely separate, comparison-
+ * level concern). For a `PRECONDITION_FAILED` candidate, no spot read
+ * was ever attempted; `analyticsStatus` is `"INDETERMINATE"` in that
+ * case too — reusing `INDETERMINATE`'s existing "could not be
+ * established" meaning (the PRECISE reason is not "could not be
+ * established" but "never attempted," which is exactly what
+ * `preconditionFailure` exists to state unambiguously — `analyticsStatus`
+ * alone was never meant to be the complete explanation for any status).
+ *
+ * `executionPrice`/`priceImpactBps` are present ONLY when ALL of: this
+ * candidate's `status === "QUOTED"`, this candidate's own
+ * `analyticsStatus === "OK"`, AND the comparison's shared
+ * `sharedAnalyticsStatus === "OK"` — three independent same-block reads
+ * (this candidate's quote, this candidate's spot, the shared decimals)
+ * must all have succeeded. A failure in any ONE of those three never
+ * blanks out `amountOut` itself, which remains ranking truth regardless
+ * (see `CrossPoolComparisonSnapshot.ranking`'s doc comment).
+ */
+interface ComparisonCandidateBase {
+  readonly pool: ClassifiedPoolIdentity;
+  readonly identityVerificationBlock: bigint;
+  readonly status: ComparisonCandidateStatus;
+  /** Present only when `status === "QUOTED"`. */
+  readonly amountOut?: bigint;
+  readonly analyticsStatus: QuoteAnalyticsStatus;
+  /** Present only when `status === "QUOTED"` AND `analyticsStatus === "OK"` AND the comparison's shared decimals resolution succeeded. */
+  readonly executionPrice?: RationalValue;
+  /** Present only under the same three conditions as `executionPrice`. Signed — see `QuoteAnalytics.priceImpactBps`'s doc comment; identical semantics apply per candidate, against THAT candidate's own same-block pre-trade spot. */
+  readonly priceImpactBps?: RationalValue;
+  /** This candidate's own quote-call and spot-read evidence. Empty for a `PRECONDITION_FAILED` candidate — see `preconditionFailure` for that case's explanation instead. */
+  readonly evidence: readonly QuoteEvidence[];
+  /** Present only when `status === "PRECONDITION_FAILED"`. */
+  readonly preconditionFailure?: ComparisonPreconditionFailure;
+}
+
+/** One V3 candidate's comparison result. `metadata` (when present) is always `UniswapV3QuoteMetadata`. */
+export interface UniswapV3ComparisonCandidate extends ComparisonCandidateBase {
+  readonly family: "UNISWAP_V3";
+  /** Present only when `status === "QUOTED"`. */
+  readonly metadata?: UniswapV3QuoteMetadata;
+}
+
+/** One V4 candidate's comparison result. `metadata` (when present) is always `UniswapV4QuoteMetadata`. */
+export interface UniswapV4ComparisonCandidate extends ComparisonCandidateBase {
+  readonly family: "UNISWAP_V4";
+  /** Present only when `status === "QUOTED"`. */
+  readonly metadata?: UniswapV4QuoteMetadata;
+  /** `true` only when the caller explicitly supplied `hookData` for THIS hooked candidate. Never claims caller-supplied `hookData` is itself verified — see the `HOOK_DATA_DISCLOSURE` entry in this candidate's own `evidence`. Absent for an unhooked candidate and for a `PRECONDITION_FAILED` candidate. */
+  readonly hookDataCallerSupplied?: boolean;
+}
+
+/** The union of both protocols' comparison candidate results — a genuine multi-protocol dispatcher's result type, since one comparison may truthfully contain both V3 and V4 candidates (see `compare-verified-pools.ts`'s doc comment for why a generic dispatcher is justified here, unlike the single-quote/depth-curve readers). */
+export type ComparisonCandidate = UniswapV3ComparisonCandidate | UniswapV4ComparisonCandidate;
+
+/**
+ * Phase 6F.2 — the outcome of `compareVerifiedPoolsExactInput` when the
+ * comparison's ONE shared `eth_blockNumber` call itself failed. No
+ * candidate was ever attempted — no spot read, no quote call, no shared
+ * decimals read — since none of those can be meaningfully pinned without
+ * a block. Deliberately a DISTINCT shape from a candidate-level
+ * `RPC_ERROR` (which means "this ONE candidate's own read failed, its
+ * siblings are unaffected") — a block-pin failure is comparison-wide by
+ * construction, and conflating the two would misrepresent a total
+ * request failure as if only one candidate were affected.
+ */
+export interface CrossPoolComparisonBlockPinFailure {
+  readonly status: "BLOCK_PIN_FAILURE";
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly amountIn: bigint;
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/**
+ * Phase 6F.2 — a same-block cross-pool execution comparison for N
+ * already identity-VERIFIED pools, all sharing the exact same verified
+ * `tokenIn`/`tokenOut` pair, for ONE exact `amountIn`. Represents ONE
+ * chain state: `blockNumber` is pinned via exactly one `eth_blockNumber`
+ * call, and every candidate's spot read + quote call, plus the shared
+ * decimals read, all use that identical block.
+ *
+ * `sharedAnalyticsStatus`/`tokenInDecimals`/`tokenOutDecimals` reflect
+ * the comparison's ONE shared decimals read (`analytics.ts`'s
+ * `readSharedDecimals`, called exactly once for the whole comparison) —
+ * completely independent of any individual candidate's own `status`/
+ * `analyticsStatus`. Deliberately NOT named `spotStatus` (unlike
+ * `DepthCurveBase`) — spot is pool-specific here, never shared; see each
+ * candidate's own `analyticsStatus` for that. A shared-decimals failure
+ * never blanks out any candidate's own `status`/`amountOut` — every
+ * `QUOTED` candidate remains fully rankable by `amountOut` regardless
+ * (see `ranking` below).
+ */
+export interface CrossPoolComparisonSnapshot {
+  readonly status: "OK";
+  readonly blockNumber: bigint;
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly amountIn: bigint;
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  readonly sharedAnalyticsStatus: QuoteAnalyticsStatus;
+  /** Evidence for the ONE shared, once-per-comparison decimals read only. Never per-candidate evidence — see each candidate's own `evidence`/`preconditionFailure` for that. */
+  readonly sharedEvidence: readonly QuoteEvidence[];
+  /** In caller-supplied candidate order — never reordered by status, completion time, or rank. See `ranking` for the derived rank order. */
+  readonly candidates: readonly ComparisonCandidate[];
+  /**
+   * Ranking truth: descending `amountOut`, compared as exact `bigint`,
+   * among `status === "QUOTED"` candidates ONLY — `UNQUOTABLE`/
+   * `INDETERMINATE`/`RPC_ERROR`/`PRECONDITION_FAILED` candidates are
+   * never included, never treated as `amountOut === 0`, and never
+   * assumed to rank "worst." Ranking is amountOut-based rather than
+   * `priceImpactBps`-based deliberately: because every candidate shares
+   * the exact same `tokenIn`/`tokenOut`/`amountIn`/decimals, ranking by
+   * `amountOut` and ranking by execution price are mathematically the
+   * same total order, and `amountOut` remains available even when a
+   * candidate's own analytics (spot) or the shared decimals read failed
+   * — analytics must never become load-bearing for ranking.
+   */
+  readonly ranking: {
+    /**
+     * `status === "QUOTED"` candidates only, in descending `amountOut`
+     * order. When two or more candidates share the exact same
+     * `amountOut` (a genuine tie), their RELATIVE order here is a
+     * deterministic presentation tie-break (ascending `pool.pairAddress`)
+     * — NOT an economic preference; see `bestCandidatePoolAddresses` for
+     * the truthful representation of which candidates are actually tied
+     * for best.
+     */
+    readonly rankedQuotedPoolAddresses: readonly Hex[];
+    /**
+     * The pool address(es) with the single largest `amountOut` among
+     * `status === "QUOTED"` candidates. Length 0 means no candidate was
+     * `QUOTED` at all. Length 1 means a unique best candidate. Length
+     * greater than 1 means a genuine, exact `amountOut` tie — reported
+     * truthfully, never arbitrarily resolved to a single "winner." No
+     * economic meaning is ever assigned to address ordering within this
+     * array.
+     */
+    readonly bestCandidatePoolAddresses: readonly Hex[];
+  };
+}
+
+/** Either a full comparison snapshot, or the comparison-wide block-pin failure representation — see `CrossPoolComparisonBlockPinFailure`'s doc comment for why the two are deliberately distinct shapes rather than one shape with more optional fields. */
+export type CrossPoolComparisonResult = CrossPoolComparisonSnapshot | CrossPoolComparisonBlockPinFailure;

@@ -286,6 +286,86 @@ export async function readSpotAndDecimals(args: ReadSpotAndDecimalsArgs): Promis
   };
 }
 
+export interface ReadSharedDecimalsArgs {
+  readonly rpc: VerifiedRobinhoodRpcClient;
+  readonly tokenInDenomination: TokenDenomination;
+  readonly tokenOutDenomination: TokenDenomination;
+  readonly blockNumber: bigint;
+}
+
+/** The `decimals`-only portion of `SharedSpotAndDecimals` — no spot price, no `tokenInIsToken0`. */
+export interface SharedDecimals {
+  readonly status: QuoteAnalyticsStatus;
+  /** Present only when `status === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `status === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/**
+ * Phase 6F.2 — resolves ONLY `tokenIn`/`tokenOut` decimals (no spot
+ * read), for a caller whose spot price is NOT a single shared value —
+ * i.e. a multi-pool cross-pool comparison, where every candidate shares
+ * the same verified `tokenIn`/`tokenOut` (so decimals are resolved once,
+ * for the whole comparison) but each candidate has its OWN pool-specific
+ * spot state (so spot can never be part of this shared read — see
+ * `compare-verified-pools.ts`). `readSpotAndDecimals` above remains the
+ * right function for every existing single-spot caller (single-quote,
+ * depth curve); this is a sibling, not a replacement, sharing the same
+ * `readDecimals`/`TokenDenomination` trust-boundary machinery
+ * underneath — never a second, independently-reasoned decimals path.
+ */
+export async function readSharedDecimals(args: ReadSharedDecimalsArgs): Promise<SharedDecimals> {
+  const { rpc, tokenInDenomination, tokenOutDenomination, blockNumber } = args;
+
+  const [decInOutcome, decOutOutcome] = await Promise.all([
+    readDecimals(rpc, tokenInDenomination, blockNumber),
+    readDecimals(rpc, tokenOutDenomination, blockNumber),
+  ]);
+
+  const evidence: QuoteEvidence[] = [
+    decInOutcome.outcome === "ok"
+      ? {
+          kind: "DECIMALS_READ",
+          outcome: "ok",
+          source: "tokenIn.decimals()",
+          observed: String(decInOutcome.value),
+          detail:
+            tokenInDenomination.kind === "V4_NATIVE_ETH"
+              ? "tokenIn is the VERIFIED V4 PoolKey's native-currency denomination — decimals resolved as the protocol-defined constant 18, no eth_call made."
+              : "tokenIn ERC20 decimals() decoded to a valid uint8 at the exact pinned comparison block.",
+        }
+      : { kind: "DECIMALS_READ", outcome: decInOutcome.outcome, source: "tokenIn.decimals()", detail: decInOutcome.detail },
+    decOutOutcome.outcome === "ok"
+      ? {
+          kind: "DECIMALS_READ",
+          outcome: "ok",
+          source: "tokenOut.decimals()",
+          observed: String(decOutOutcome.value),
+          detail:
+            tokenOutDenomination.kind === "V4_NATIVE_ETH"
+              ? "tokenOut is the VERIFIED V4 PoolKey's native-currency denomination — decimals resolved as the protocol-defined constant 18, no eth_call made."
+              : "tokenOut ERC20 decimals() decoded to a valid uint8 at the exact pinned comparison block.",
+        }
+      : { kind: "DECIMALS_READ", outcome: decOutOutcome.outcome, source: "tokenOut.decimals()", detail: decOutOutcome.detail },
+  ];
+
+  const anyRpcError = decInOutcome.outcome === "rpc_error" || decOutOutcome.outcome === "rpc_error";
+  const anyDecodeError = decInOutcome.outcome === "decode_error" || decOutOutcome.outcome === "decode_error";
+
+  let status: QuoteAnalyticsStatus;
+  if (anyRpcError) status = "RPC_ERROR";
+  else if (anyDecodeError) status = "INDETERMINATE";
+  else status = "OK";
+
+  if (status !== "OK" || decInOutcome.outcome !== "ok" || decOutOutcome.outcome !== "ok") {
+    return { status, evidence };
+  }
+
+  return { status: "OK", tokenInDecimals: decInOutcome.value, tokenOutDecimals: decOutOutcome.value, evidence };
+}
+
 export interface AssembleQuoteAnalyticsArgs extends ReadSpotAndDecimalsArgs {
   readonly amountIn: bigint;
   readonly amountOut: bigint;

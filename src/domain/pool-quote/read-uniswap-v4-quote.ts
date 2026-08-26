@@ -19,7 +19,8 @@ import {
 import { callQuoter, classifyRevert, describeError } from "./read";
 import type { QuoteEvidence, QuoteStatus, UniswapV4QuoteMetadata, UniswapV4QuoteVerification, UniswapV4QuoteWithAnalytics } from "./types";
 
-const UINT128_MAX = (1n << 128n) - 1n;
+/** `V4Quoter.quoteExactInputSingle`'s `exactAmount` is `uint128` — this is that ABI-level bound, exported so callers that need to distinguish "amountIn <= 0" (globally invalid) from "amountIn exceeds V4's own representable range" (a V4-specific constraint another protocol's candidate may not share — see `compare-verified-pools.ts`) can do so without duplicating this literal. */
+export const UINT128_MAX = (1n << 128n) - 1n;
 
 export interface QuoteVerifiedUniswapV4ExactInputInput {
   readonly pool: LiquidityPool;

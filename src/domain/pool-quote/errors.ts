@@ -19,7 +19,11 @@ export type QuotePreconditionErrorCode =
   | "MISSING_VERIFIED_POOL_KEY"
   | "MISSING_VERIFIED_V3_POOL_KEY"
   | "MISSING_HOOK_DATA"
-  | "EMPTY_AMOUNTS_LADDER";
+  | "EMPTY_AMOUNTS_LADDER"
+  | "EMPTY_CANDIDATES"
+  | "DUPLICATE_CANDIDATE"
+  | "MISMATCHED_COMPARISON_GROUP"
+  | "UNSUPPORTED_COMPARISON_IDENTITY_FAMILY";
 
 export abstract class QuotePreconditionError extends Error {
   abstract readonly code: QuotePreconditionErrorCode;
@@ -155,5 +159,77 @@ export class EmptyAmountsLadderError extends QuotePreconditionError {
   constructor() {
     super("amountsIn must contain at least one entry — a depth curve with zero requested trade sizes is not a meaningful request");
     this.name = "EmptyAmountsLadderError";
+  }
+}
+
+/** Phase 6F.2: `candidates` (the cross-pool comparison list) has zero entries. A comparison with nothing to compare is not a meaningful request. Thrown before any RPC call. */
+export class EmptyCandidatesError extends QuotePreconditionError {
+  readonly code = "EMPTY_CANDIDATES" as const;
+
+  constructor() {
+    super("candidates must contain at least one entry — a comparison with zero candidates is not a meaningful request");
+    this.name = "EmptyCandidatesError";
+  }
+}
+
+/** Phase 6F.2: the same pool (identical `chainId` + `pairAddress`, case-insensitive) appears more than once in `candidates`. Quoting the same pool twice has no product value and would silently double-count/duplicate one execution outcome in a ranked list — rejected rather than silently deduplicated, so a caller-side bug is surfaced instead of hidden. Thrown before any RPC call. */
+export class DuplicateCandidateError extends QuotePreconditionError {
+  readonly code = "DUPLICATE_CANDIDATE" as const;
+  readonly chainId: string;
+  readonly pairAddress: string;
+
+  constructor(chainId: string, pairAddress: string) {
+    super(
+      `candidates contains the same pool (chainId="${chainId}", pairAddress="${pairAddress}") more than once — a comparison must not quote the same pool twice`,
+    );
+    this.name = "DuplicateCandidateError";
+    this.chainId = chainId;
+    this.pairAddress = pairAddress;
+  }
+}
+
+/**
+ * Phase 6F.2: two candidates' VERIFIED identities resolve `tokenIn` to
+ * the same requested address (a comparison precondition already
+ * enforces this via `InvalidTokenInError` otherwise) but different
+ * `tokenOut` addresses — i.e. the caller assembled a candidate list that
+ * is not one single comparable group (see `compareVerifiedPoolsExactInput`'s
+ * doc comment). This is a caller/orchestration-layer bug, not a market
+ * outcome, so the whole request is rejected before any RPC call rather
+ * than silently comparing economically unrelated outcomes.
+ */
+export class MismatchedComparisonGroupError extends QuotePreconditionError {
+  readonly code = "MISMATCHED_COMPARISON_GROUP" as const;
+  readonly expectedTokenOut: string;
+  readonly actualTokenOut: string;
+
+  constructor(expectedTokenOut: string, actualTokenOut: string) {
+    super(
+      `candidates do not share the same verified tokenOut — expected "${expectedTokenOut}" (established by an earlier candidate) but a later candidate's verified identity resolves tokenOut to "${actualTokenOut}"; every candidate in one comparison must resolve to the exact same tokenIn/tokenOut pair`,
+    );
+    this.name = "MismatchedComparisonGroupError";
+    this.expectedTokenOut = expectedTokenOut;
+    this.actualTokenOut = actualTokenOut;
+  }
+}
+
+/**
+ * Phase 6F.2: `identity.family` is neither `"UNISWAP_V3"` nor
+ * `"UNISWAP_V4"`. Deliberately a distinct error from
+ * `UnsupportedIdentityFamilyError` above (which is worded for a
+ * single-protocol-specific function expecting exactly one family) —
+ * `compareVerifiedPoolsExactInput` is a genuine multi-protocol
+ * dispatcher and supports two families, so "not one of the two families
+ * this dispatcher supports" needs its own message rather than reusing
+ * "this function only supports ${expectedFamily}" (singular).
+ */
+export class UnsupportedComparisonIdentityFamilyError extends QuotePreconditionError {
+  readonly code = "UNSUPPORTED_COMPARISON_IDENTITY_FAMILY" as const;
+  readonly family: string;
+
+  constructor(family: string) {
+    super(`identity.family is "${family}" — compareVerifiedPoolsExactInput only supports UNISWAP_V3 and UNISWAP_V4 candidates`);
+    this.name = "UnsupportedComparisonIdentityFamilyError";
+    this.family = family;
   }
 }

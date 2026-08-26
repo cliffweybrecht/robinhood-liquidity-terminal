@@ -321,6 +321,54 @@ export function verifiedV4Identity(
   return { pool: p, identity };
 }
 
+/**
+ * Phase 6F.2 — builds a VERIFIED comparison candidate (`{ pool, identity
+ * }`, matching `ComparisonCandidateInput`'s shape minus `hookData`) for a
+ * V3 pool at an explicit, caller-chosen `pairAddress`/`fee`. Distinct
+ * from `verifiedV3Identity` (which always uses the single fixed
+ * `POOL_ADDRESS`/`DEFAULT_FEE`) precisely because a multi-candidate
+ * comparison test needs several DISTINCT V3 pools sharing the same
+ * `token0`/`token1` but each with its own address/fee tier — exactly
+ * how real V3 pools for the same pair differ from each other.
+ */
+export function v3ComparisonCandidate(args: {
+  pairAddress: Address;
+  fee?: number;
+  token0?: Address;
+  token1?: Address;
+}): { pool: LiquidityPool; identity: PoolIdentityVerification } {
+  return verifiedV3Identity({ pairAddress: args.pairAddress }, {}, { token0: args.token0 ?? NVDA, token1: args.token1 ?? USDG, fee: args.fee ?? DEFAULT_FEE });
+}
+
+/**
+ * Phase 6F.2 — builds a VERIFIED comparison candidate for a V4 pool at
+ * an explicit, caller-chosen `poolId` (`pairAddress`) and `PoolKey`
+ * fields. Mirrors `v3ComparisonCandidate` above for V4 — several
+ * DISTINCT V4 pools sharing the same `currency0`/`currency1` but
+ * differing `fee`/`tickSpacing`/`hooks`, exactly how real V4 pools for
+ * the same pair differ.
+ */
+export function v4ComparisonCandidate(args: {
+  poolId: Hex;
+  fee?: number;
+  tickSpacing?: number;
+  hooks?: Address;
+  currency0?: Address;
+  currency1?: Address;
+}): { pool: LiquidityPool; identity: PoolIdentityVerification } {
+  return verifiedV4Identity(
+    { pairAddress: args.poolId },
+    {},
+    {
+      currency0: args.currency0 ?? WETH,
+      currency1: args.currency1 ?? NVDA,
+      fee: args.fee ?? DEFAULT_FEE,
+      tickSpacing: args.tickSpacing ?? DEFAULT_TICK_SPACING,
+      hooks: args.hooks ?? ("0x0000000000000000000000000000000000000000" as Address),
+    },
+  );
+}
+
 export type RpcStub = Hex | (() => Promise<Hex>) | { error: unknown } | { revert: Hex };
 
 function toFn(stub: RpcStub | undefined, fallback: Hex): () => Promise<Hex> {
@@ -444,6 +492,143 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
     },
     getLogs: async () => {
       throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6E.1/6E.2 quote reads)");
+    },
+  };
+
+  return { rpc, calls };
+}
+
+export interface V3CandidateFixtureStub {
+  readonly kind: "v3";
+  readonly pairAddress: Address;
+  readonly fee: number;
+  readonly slot0?: RpcStub;
+  readonly quote?: RpcStub;
+}
+
+export interface V4CandidateFixtureStub {
+  readonly kind: "v4";
+  readonly poolId: Hex;
+  readonly fee: number;
+  readonly tickSpacing: number;
+  readonly hooks: Address;
+  readonly slot0?: RpcStub;
+  readonly quote?: RpcStub;
+}
+
+export type MultiPoolCandidateFixtureStub = V3CandidateFixtureStub | V4CandidateFixtureStub;
+
+export interface FakeMultiPoolRpcOptions {
+  readonly chainId?: number;
+  readonly getBlockNumber?: (() => Promise<bigint>) | { error: unknown };
+  readonly decimalsByAddress?: Readonly<Record<string, RpcStub>>;
+}
+
+/**
+ * Phase 6F.2 — a fake `VerifiedRobinhoodRpcClient` for cross-pool
+ * comparison tests, where SEVERAL distinct pools of the SAME protocol
+ * (and even the same `tokenIn`/`tokenOut`) must each receive their OWN
+ * spot/quote response. `buildFakeRpc` above cannot express this: its
+ * quote routing keys ONLY on `amountIn` (sufficient for one pool's depth
+ * curve, where `amountIn` is what varies across calls) — but in one
+ * comparison, EVERY candidate is quoted at the SAME shared `amountIn`,
+ * so `amountIn` alone cannot distinguish which candidate a given call
+ * belongs to.
+ *
+ * Routing, using the REAL calldata layout (never hand-transcribed —
+ * confirmed against `abi/selectors.ts`'s own encoders):
+ *  - V3 `slot0()` has no arguments, so `to` (the pool's own address)
+ *    already uniquely identifies the candidate.
+ *  - V3 `quoteExactInputSingle(...)`'s `to` is always the ONE shared
+ *    `V3_QUOTER` address for every V3 candidate — routed instead by the
+ *    `fee` word (calldata word index 3 of the static 5-field tuple),
+ *    which callers give each V3 candidate a distinct value for.
+ *  - V4 `StateView.getSlot0(poolId)`'s `to` is always the ONE shared
+ *    StateView address — routed by the `poolId` word (word index 0, the
+ *    call's sole `bytes32` argument).
+ *  - V4 `quoteExactInputSingle(...)`'s `to` is always the ONE shared
+ *    `V4_QUOTER` address — routed by the `(fee, tickSpacing, hooks)`
+ *    words of the `poolKey` sub-tuple (word indices 3, 4, 5 — see
+ *    `buildFakeRpc`'s own comment on the leading dynamic-tuple offset
+ *    word for why `poolKey` starts at word index 1, not 0).
+ */
+export function buildFakeMultiPoolRpc(
+  candidateStubs: readonly MultiPoolCandidateFixtureStub[],
+  options: FakeMultiPoolRpcOptions = {},
+): { rpc: VerifiedRobinhoodRpcClient; calls: FakeRpcCallLog } {
+  const calls: FakeRpcCallLog = { getBlockNumberCalls: 0, callCalls: [] };
+
+  const v3QuoteSelector = encodeQuoteExactInputSingleV3Call(NVDA, USDG, DEFAULT_AMOUNT_IN, DEFAULT_FEE).slice(0, 10);
+  const v4QuoteSelector = encodeQuoteExactInputSingleV4Call(DEFAULT_V4_POOL_KEY, true, DEFAULT_AMOUNT_IN, "0x").slice(0, 10);
+  const slot0Selector = encodeSlot0Call().slice(0, 10);
+  const getSlot0Selector = encodeGetSlot0Call(V4_POOL_ID).slice(0, 10);
+  const decimalsSelector = encodeDecimalsCall().slice(0, 10);
+
+  function word(data: string, index: number): string {
+    return data.slice(10 + 64 * index, 10 + 64 * (index + 1));
+  }
+
+  const rpc: VerifiedRobinhoodRpcClient = {
+    chainId: options.chainId ?? 4663,
+    getBlockNumber: async () => {
+      calls.getBlockNumberCalls += 1;
+      if (options.getBlockNumber && typeof options.getBlockNumber !== "function") throw options.getBlockNumber.error;
+      return options.getBlockNumber ? (options.getBlockNumber as () => Promise<bigint>)() : QUOTE_BLOCK;
+    },
+    getCode: async () => {
+      throw new Error("unstubbed fake RPC call: getCode (not used by Phase 6F.2 comparison reads)");
+    },
+    call: async (request, blockTag) => {
+      calls.callCalls.push({ to: request.to, data: request.data, blockTag });
+      const selector = request.data.slice(0, 10);
+
+      if (selector === decimalsSelector) {
+        const key = request.to.toLowerCase();
+        const stub = options.decimalsByAddress?.[key];
+        if (stub !== undefined) return toFn(stub, decimalsReturn(18))();
+        const fallback = DEFAULT_DECIMALS_BY_ADDRESS[key];
+        return decimalsReturn(fallback ?? 18);
+      }
+
+      if (selector === slot0Selector) {
+        const candidate = candidateStubs.find((c): c is V3CandidateFixtureStub => c.kind === "v3" && c.pairAddress.toLowerCase() === request.to.toLowerCase());
+        if (!candidate) throw new Error(`buildFakeMultiPoolRpc: no V3 candidate stub for slot0() to=${request.to}`);
+        return toFn(candidate.slot0, slot0V3Return())();
+      }
+
+      if (selector === getSlot0Selector) {
+        const poolId = `0x${word(request.data, 0)}` as Hex;
+        const candidate = candidateStubs.find((c): c is V4CandidateFixtureStub => c.kind === "v4" && c.poolId.toLowerCase() === poolId.toLowerCase());
+        if (!candidate) throw new Error(`buildFakeMultiPoolRpc: no V4 candidate stub for getSlot0(poolId=${poolId})`);
+        return toFn(candidate.slot0, slot0V4Return())();
+      }
+
+      if (selector === v3QuoteSelector) {
+        const fee = Number(BigInt(`0x${word(request.data, 3)}`));
+        const candidate = candidateStubs.find((c): c is V3CandidateFixtureStub => c.kind === "v3" && c.fee === fee);
+        if (!candidate) throw new Error(`buildFakeMultiPoolRpc: no V3 candidate stub for quote fee=${fee}`);
+        return toFn(candidate.quote, v3QuoteReturn())();
+      }
+
+      if (selector === v4QuoteSelector) {
+        // word 0 = leading dynamic-tuple offset; poolKey occupies words
+        // 1-5 (currency0, currency1, fee, tickSpacing, hooks) — see
+        // `buildFakeRpc`'s own comment for the full empirical layout.
+        const fee = Number(BigInt(`0x${word(request.data, 3)}`));
+        const tickSpacingRaw = BigInt(`0x${word(request.data, 4)}`);
+        const tickSpacing = Number(tickSpacingRaw > (1n << 255n) ? tickSpacingRaw - (1n << 256n) : tickSpacingRaw);
+        const hooks = `0x${word(request.data, 5).slice(24)}`.toLowerCase();
+        const candidate = candidateStubs.find(
+          (c): c is V4CandidateFixtureStub => c.kind === "v4" && c.fee === fee && c.tickSpacing === tickSpacing && c.hooks.toLowerCase() === hooks,
+        );
+        if (!candidate) throw new Error(`buildFakeMultiPoolRpc: no V4 candidate stub for quote fee=${fee} tickSpacing=${tickSpacing} hooks=${hooks}`);
+        return toFn(candidate.quote, v4QuoteReturn())();
+      }
+
+      throw new Error(`unstubbed fake RPC call: to=${request.to} data=${request.data}`);
+    },
+    getLogs: async () => {
+      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6F.2 comparison reads)");
     },
   };
 
