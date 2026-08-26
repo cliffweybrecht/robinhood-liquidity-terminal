@@ -5,6 +5,7 @@ import {
   InvalidAmountInError,
   InvalidTokenInError,
   MissingIdentityBlockError,
+  MissingVerifiedV3PoolKeyError,
   PoolIdentityMismatchError,
   UnsupportedIdentityFamilyError,
 } from "../errors";
@@ -13,7 +14,6 @@ import {
   buildFakeRpc,
   DEFAULT_AMOUNT_IN,
   errorStringRevert,
-  feeReturn,
   IDENTITY_BLOCK,
   NVDA,
   OTHER_TOKEN,
@@ -23,6 +23,7 @@ import {
   v3QuoteReturn,
   verifiedV3Identity,
   verifiedV4Identity,
+  WETH,
 } from "./fixtures";
 
 describe("quoteVerifiedUniswapV3ExactInput — precondition", () => {
@@ -113,7 +114,7 @@ describe("quoteVerifiedUniswapV3ExactInput — precondition", () => {
 });
 
 describe("quoteVerifiedUniswapV3ExactInput — block pinning", () => {
-  it("calls getBlockNumber exactly once and pins fee()/quote reads to that exact block", async () => {
+  it("calls getBlockNumber exactly once and pins the quote read to that exact block (no fee() read — fee is now a typed identity fact)", async () => {
     const { pool, identity } = verifiedV3Identity();
     const { rpc, calls } = buildFakeRpc({ getBlockNumber: async () => 999888n });
 
@@ -121,7 +122,7 @@ describe("quoteVerifiedUniswapV3ExactInput — block pinning", () => {
 
     expect(calls.getBlockNumberCalls).toBe(1);
     expect(result.quoteBlockNumber).toBe(999888n);
-    expect(calls.callCalls.length).toBe(2); // fee() + quoter
+    expect(calls.callCalls.length).toBe(1); // quoter only
     for (const c of calls.callCalls) expect(c.blockTag).toBe(999888n);
   });
 
@@ -204,44 +205,96 @@ describe("quoteVerifiedUniswapV3ExactInput — VERIFIED happy path", () => {
   });
 });
 
-describe("quoteVerifiedUniswapV3ExactInput — fee() supporting read", () => {
-  it("returns RPC_ERROR when fee() fails, without ever attempting the quoter call", async () => {
-    const { pool, identity } = verifiedV3Identity();
-    const { rpc, calls } = buildFakeRpc({ fee: { error: new Error("transport down") } });
+describe("quoteVerifiedUniswapV3ExactInput — verified typed identity facts (no live fee() read)", () => {
+  it("missing v3PoolKey on an otherwise-VERIFIED V3 identity fails BEFORE any RPC call", async () => {
+    const { pool, identity } = verifiedV3Identity({}, { v3PoolKey: null });
+    const { rpc, calls } = buildFakeRpc();
 
-    const result = await quoteVerifiedUniswapV3ExactInput({ pool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc });
-
-    expect(result.status).toBe("RPC_ERROR");
-    const quoterCalls = calls.callCalls.filter((c) => c.to.toLowerCase() === "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7");
-    expect(quoterCalls).toHaveLength(0);
+    await expect(quoteVerifiedUniswapV3ExactInput({ pool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc })).rejects.toThrow(
+      MissingVerifiedV3PoolKeyError,
+    );
+    expect(calls.getBlockNumberCalls).toBe(0);
+    expect(calls.callCalls).toHaveLength(0);
   });
 
-  it("returns INDETERMINATE when fee() returns malformed data, without ever attempting the quoter call", async () => {
-    const { pool, identity } = verifiedV3Identity();
-    const { rpc, calls } = buildFakeRpc({ fee: `0x${oversizedWord()}` as Hex });
-
-    const result = await quoteVerifiedUniswapV3ExactInput({ pool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc });
-
-    expect(result.status).toBe("INDETERMINATE");
-    const quoterCalls = calls.callCalls.filter((c) => c.to.toLowerCase() === "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7");
-    expect(quoterCalls).toHaveLength(0);
-  });
-
-  it("uses the fee() read result as an input to the quoter call, never a hardcoded value", async () => {
-    const { pool, identity } = verifiedV3Identity();
-    const { rpc, calls } = buildFakeRpc({ fee: feeReturn(3000) });
+  it("uses identity.v3PoolKey.fee (a typed, already-verified identity fact) as the quoter calldata input — never a live fee() read", async () => {
+    const { pool, identity } = verifiedV3Identity({}, {}, { fee: 3000 });
+    const { rpc, calls } = buildFakeRpc();
 
     const result = await quoteVerifiedUniswapV3ExactInput({ pool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc });
 
     expect(result.status).toBe("QUOTED");
+    // Only one call total — the quoter — no separate fee() read at all.
+    expect(calls.callCalls).toHaveLength(1);
     // The quoter call's calldata is a single static tuple
     // (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96) — word index 3
     // (0-indexed, after the 4-byte selector) is the fee field. Confirm it
-    // reflects fee()'s stubbed 3000 (0xbb8), not the default 500.
+    // reflects identity.v3PoolKey's typed 3000 (0xbb8), not the default 500.
     const quoterCall = calls.callCalls.find((c) => c.to.toLowerCase() === "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7");
     expect(quoterCall).toBeDefined();
     const feeWord = quoterCall?.data.slice(10 + 64 * 3, 10 + 64 * 4);
     expect(BigInt(`0x${feeWord}`)).toBe(3000n);
+  });
+});
+
+describe("quoteVerifiedUniswapV3ExactInput — adversarial pool/identity spoof resistance", () => {
+  it("a genuine VERIFIED identity for pair A, paired with a supplied LiquidityPool bearing the SAME pairAddress but ALTERED baseToken/quoteToken (pair B), rejects a token from pair B BEFORE any RPC call — zero eth_blockNumber, zero fee reads, zero quoter calls, zero analytics reads", async () => {
+    // identity.v3PoolKey is genuinely verified for pair A = {NVDA, USDG} (the fixture default).
+    // `pool` carries the SAME pairAddress/chainId but claims an entirely
+    // different token pair B = {WETH, OTHER_TOKEN} — exactly the spoof
+    // scenario: a caller pairing a real VERIFIED identity with an altered
+    // LiquidityPool object.
+    const { pool: genuinePool, identity } = verifiedV3Identity();
+    const spoofedPool = { ...genuinePool, baseToken: { address: WETH, name: "WETH", symbol: "WETH" }, quoteToken: { address: OTHER_TOKEN, name: "OTHER", symbol: "OTHER" } };
+    const { rpc, calls } = buildFakeRpc();
+
+    // Attempting to quote using a token from the SPOOFED pair (WETH) must
+    // fail — WETH is not in identity.v3PoolKey.token0/token1 (pair A).
+    await expect(
+      quoteVerifiedUniswapV3ExactInput({ pool: spoofedPool, identity, tokenIn: WETH, amountIn: DEFAULT_AMOUNT_IN, rpc }),
+    ).rejects.toThrow(InvalidTokenInError);
+    expect(calls.getBlockNumberCalls).toBe(0);
+    expect(calls.callCalls).toHaveLength(0);
+  });
+
+  it("altered pool.baseToken/quoteToken metadata cannot change tokenOut — tokenOut is derived exclusively from identity.v3PoolKey", async () => {
+    const { pool: genuinePool, identity } = verifiedV3Identity();
+    // Same spoofed metadata, but this time query with a token that IS
+    // genuinely in the verified pair (NVDA) — the call must still
+    // succeed, and tokenOut must be USDG (from v3PoolKey), NEVER
+    // OTHER_TOKEN or WETH (which is what the spoofed `pool` object claims).
+    const spoofedPool = { ...genuinePool, baseToken: { address: WETH, name: "WETH", symbol: "WETH" }, quoteToken: { address: OTHER_TOKEN, name: "OTHER", symbol: "OTHER" } };
+    const { rpc } = buildFakeRpc();
+
+    const result = await quoteVerifiedUniswapV3ExactInput({ pool: spoofedPool, identity, tokenIn: NVDA, amountIn: DEFAULT_AMOUNT_IN, rpc });
+
+    expect(result.status).toBe("QUOTED");
+    expect(result.tokenIn.toLowerCase()).toBe(NVDA.toLowerCase());
+    expect(result.tokenOut.toLowerCase()).toBe(USDG.toLowerCase());
+    expect(result.tokenOut.toLowerCase()).not.toBe(OTHER_TOKEN.toLowerCase());
+    expect(result.tokenOut.toLowerCase()).not.toBe(WETH.toLowerCase());
+  });
+
+  it("typed identity.v3PoolKey.token0/token1 — not pool.baseToken/quoteToken — determine valid tokenIn/direction even when pool metadata agrees (sanity: the normal, non-spoofed path still works)", async () => {
+    const { pool, identity } = verifiedV3Identity();
+    const { rpc } = buildFakeRpc();
+
+    const result = await quoteVerifiedUniswapV3ExactInput({ pool, identity, tokenIn: USDG, amountIn: DEFAULT_AMOUNT_IN, rpc });
+
+    expect(result.status).toBe("QUOTED");
+    expect(result.tokenIn.toLowerCase()).toBe(USDG.toLowerCase());
+    expect(result.tokenOut.toLowerCase()).toBe(NVDA.toLowerCase());
+  });
+
+  it("a tokenIn that matches the SPOOFED pool's metadata but not the verified v3PoolKey is still rejected, even though it would have been valid against the (wrong) pool object", async () => {
+    const { pool: genuinePool, identity } = verifiedV3Identity();
+    const spoofedPool = { ...genuinePool, baseToken: { address: WETH, name: "WETH", symbol: "WETH" }, quoteToken: { address: OTHER_TOKEN, name: "OTHER", symbol: "OTHER" } };
+    const { rpc, calls } = buildFakeRpc();
+
+    await expect(
+      quoteVerifiedUniswapV3ExactInput({ pool: spoofedPool, identity, tokenIn: OTHER_TOKEN, amountIn: DEFAULT_AMOUNT_IN, rpc }),
+    ).rejects.toThrow(InvalidTokenInError);
+    expect(calls.callCalls).toHaveLength(0);
   });
 });
 

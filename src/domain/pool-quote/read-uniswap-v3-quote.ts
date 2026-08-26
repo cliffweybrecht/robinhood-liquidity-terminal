@@ -1,20 +1,22 @@
-import { getAddress, type Address } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import type { LiquidityPool } from "@/domain/pool";
 import type { PoolIdentityVerification } from "@/domain/pool-verification";
 import { getProtocolDeploymentAddress } from "@/domain/pool-verification";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { decodeUint24Return, decodeV3QuoteReturn } from "./abi/decode";
-import { encodeFeeCall, encodeQuoteExactInputSingleV3Call } from "./abi/selectors";
+import { assembleQuoteAnalytics } from "./analytics";
+import { decodeV3QuoteReturn, decodeV3Slot0SqrtPriceX96 } from "./abi/decode";
+import { encodeQuoteExactInputSingleV3Call, encodeSlot0Call } from "./abi/selectors";
 import {
   IdentityNotVerifiedError,
   InvalidAmountInError,
   InvalidTokenInError,
   MissingIdentityBlockError,
+  MissingVerifiedV3PoolKeyError,
   PoolIdentityMismatchError,
   UnsupportedIdentityFamilyError,
 } from "./errors";
 import { callQuoter, classifyRevert, describeError } from "./read";
-import type { QuoteEvidence, QuoteStatus, UniswapV3QuoteMetadata, UniswapV3QuoteVerification } from "./types";
+import type { QuoteEvidence, QuoteStatus, UniswapV3QuoteMetadata, UniswapV3QuoteVerification, UniswapV3QuoteWithAnalytics } from "./types";
 
 export interface QuoteVerifiedUniswapV3ExactInputInput {
   readonly pool: LiquidityPool;
@@ -40,51 +42,63 @@ export interface QuoteVerifiedUniswapV3ExactInputInput {
  *  3. `identity.family` must be `"UNISWAP_V3"`.
  *  4. `identity.blockNumber` must be non-null (defensive; unreachable
  *     in practice given `VERIFIED` implies a pinned block).
- *  5. `amountIn` must be greater than zero.
- *  6. `tokenIn` must be one of the verified pool's two tokens — `tokenOut`
- *     is derived from this, never caller-supplied, and neither is `fee`
- *     or the quoter contract address.
+ *  5. `identity.v3PoolKey` must be present (defensive — unreachable in
+ *     practice given `VERIFIED`/`UNISWAP_V3` always populates it, see
+ *     `pool-verification/strategies/uniswap-v3.ts`). This is also the
+ *     trust-boundary fix at the heart of this precondition list: `tokenIn`/
+ *     `tokenOut`/`fee` are derived EXCLUSIVELY from
+ *     `identity.v3PoolKey.token0`/`token1`/`fee` below — the SAME values
+ *     Phase 6C.1 already independently read on-chain (`token0()`/
+ *     `token1()`/`fee()`) and cryptographically confirmed via the
+ *     canonical factory's `getPool(token0, token1, fee)` lookup — NEVER
+ *     from the caller-supplied `pool.baseToken`/`pool.quoteToken` fields,
+ *     which are only Dexscreener-reported (see `pool/types.ts`) and are
+ *     NOT re-verified against `identity` beyond the `pairAddress`/
+ *     `chainId` check in precondition 1. A caller could otherwise pair a
+ *     genuinely `VERIFIED` identity for one pool with a `LiquidityPool`
+ *     object carrying the same `pairAddress` but altered
+ *     `baseToken`/`quoteToken` addresses — this precondition, and the
+ *     `tokenIn` derivation below, make that structurally impossible: the
+ *     quote can only ever be constructed from the independently-verified
+ *     token pair, never the caller-supplied one.
+ *  6. `amountIn` must be greater than zero.
+ *  7. `tokenIn` must be one of `identity.v3PoolKey.token0`/`token1` —
+ *     `tokenOut` and `fee` are derived from that same typed, verified
+ *     fact, never caller-supplied, and never read from `pool` at all.
  *
- * `fee` is not caller-suppliable and is not available as a typed field
- * anywhere in this codebase's existing identity result — Phase 6C.1's
- * identity proof only exposes it as free-form evidence text (the same
- * situation `VerifiedV4PoolKey` fixed for V4's PoolKey — see
- * `pool-verification/types.ts`). Rather than parse that evidence string,
- * or accept a caller-supplied fee (explicitly forbidden — fee must come
- * from trustworthy verified/canonical data, never an arbitrary input),
- * this function reads `pool.fee()` itself as one additional supporting
- * call, pinned to the *exact same* `quoteBlockNumber` as the quote call
- * — never a separately-pinned, potentially-drifted block. This is not a
- * Phase 6D `pool-state` read (no external `UniswapV3PoolState` object is
- * accepted or required as input, and this module does not import
- * `pool-state` at all) — it is a minimal, quote-module-owned read of
- * exactly the one fact the canonical quoter's ABI requires that isn't
- * otherwise available as trustworthy typed data.
+ * `fee` is `identity.v3PoolKey.fee` — the SAME `uint24` Phase 6C.1
+ * already read and proved immutable (Uniswap V3 pools have no dynamic-fee
+ * mechanism; `fee()` is set once in the pool's constructor and can never
+ * change). Because this is now a typed, already-proven identity fact,
+ * this function performs NO supporting `fee()` read of its own — doing
+ * so would only re-read a value that cannot have changed since
+ * verification, at the cost of an extra `eth_call` per quote, with zero
+ * additional trust gained.
  *
  * After preconditions, exactly one `eth_blockNumber` call pins
- * `quoteBlockNumber`; the supporting `fee()` read and the single
- * `QuoterV2.quoteExactInputSingle` call are both pinned to that same
- * block. `eth_blockNumber` is never called a second time.
+ * `quoteBlockNumber`; the single `QuoterV2.quoteExactInputSingle` call
+ * is pinned to that block. `eth_blockNumber` is never called a second
+ * time.
  *
- * `QUOTED` requires: the `fee()` read and the quoter call to both
- * transport-succeed, the quoter's 4-word return to strictly decode, and
- * (see the module-level `amountOut === 0` reasoning below) `amountOut`
- * to be a semantically usable `uint256`. Economic quality — however
- * extreme the price movement, however many ticks crossed, however bad
- * the effective rate — never changes this: `QUOTED` reflects only
- * whether the canonical protocol simulation itself succeeded, per the
- * frozen architecture. A quoter revert is classified via
- * `abi/revert.ts`'s explicit, hand-verified allowlist into `UNQUOTABLE`
- * (a known canonical failure reason, reachable through this reader's own
- * valid precondition domain) or `INDETERMINATE` (anything else, including
- * a bare/empty revert) — see that module's doc comment. As of this
- * writing the V3 allowlist has zero entries: "AS" (`amountSpecified != 0`)
- * was considered and deliberately excluded because it is provably
- * unreachable through this reader (this function's own `amountIn <= 0`
- * precondition, above, already rejects the only input that could trigger
- * it, before any RPC call) — no other V3 revert reason has yet been
- * positively characterized as both canonical and reachable here. Every
- * V3 revert this reader can currently receive therefore resolves to
+ * `QUOTED` requires: the quoter call to transport-succeed, the quoter's
+ * 4-word return to strictly decode, and (see the module-level
+ * `amountOut === 0` reasoning below) `amountOut` to be a semantically
+ * usable `uint256`. Economic quality — however extreme the price
+ * movement, however many ticks crossed, however bad the effective rate —
+ * never changes this: `QUOTED` reflects only whether the canonical
+ * protocol simulation itself succeeded, per the frozen architecture. A
+ * quoter revert is classified via `abi/revert.ts`'s explicit, hand-
+ * verified allowlist into `UNQUOTABLE` (a known canonical failure
+ * reason, reachable through this reader's own valid precondition domain)
+ * or `INDETERMINATE` (anything else, including a bare/empty revert) —
+ * see that module's doc comment. As of this writing the V3 allowlist has
+ * zero entries: "AS" (`amountSpecified != 0`) was considered and
+ * deliberately excluded because it is provably unreachable through this
+ * reader (this function's own `amountIn <= 0` precondition, above,
+ * already rejects the only input that could trigger it, before any RPC
+ * call) — no other V3 revert reason has yet been positively
+ * characterized as both canonical and reachable here. Every V3 revert
+ * this reader can currently receive therefore resolves to
  * `INDETERMINATE`, which is the correct, evidence-honest outcome, not a
  * gap to be papered over by allowlisting something unproven.
  *
@@ -95,8 +109,16 @@ export interface QuoteVerifiedUniswapV3ExactInputInput {
  * structurally and semantically valid `QUOTED` result (a real, if
  * uninteresting, answer), never downgraded — consistent with the frozen
  * "do not invent economic rejection thresholds" rule.
+ *
+ * Preconditions + block pin + the single canonical
+ * `QuoterV2.quoteExactInputSingle` call — extracted (Phase 6E.2) into a
+ * private, unexported core so `quoteVerifiedUniswapV3ExactInputWithAnalytics`
+ * can reuse it byte-for-byte rather than duplicating any precondition or
+ * revert-classification logic. `quoteVerifiedUniswapV3ExactInput` below
+ * is a one-line wrapper around this function. Never exported from
+ * `index.ts`.
  */
-export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
+async function runV3QuoteCore(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
   const { pool, identity, tokenIn, amountIn, rpc } = input;
 
   if (identity.pool.chainId !== pool.chainId || identity.pool.pairAddress.toLowerCase() !== pool.pairAddress.toLowerCase()) {
@@ -111,20 +133,24 @@ export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUnisw
   if (identity.blockNumber === null) {
     throw new MissingIdentityBlockError();
   }
+  const v3PoolKey = identity.v3PoolKey;
+  if (v3PoolKey === null || v3PoolKey === undefined) {
+    throw new MissingVerifiedV3PoolKeyError();
+  }
   if (amountIn <= 0n) {
     throw new InvalidAmountInError(amountIn);
   }
 
-  const baseAddress = pool.baseToken.address.toLowerCase();
-  const quoteAddress = pool.quoteToken.address.toLowerCase();
+  const token0Lower = v3PoolKey.token0.toLowerCase();
+  const token1Lower = v3PoolKey.token1.toLowerCase();
   const tokenInLower = tokenIn.toLowerCase();
-  if (tokenInLower !== baseAddress && tokenInLower !== quoteAddress) {
+  if (tokenInLower !== token0Lower && tokenInLower !== token1Lower) {
     throw new InvalidTokenInError(tokenIn);
   }
-  const tokenOut: Address = tokenInLower === baseAddress ? pool.quoteToken.address : pool.baseToken.address;
+  const tokenOut: Address = tokenInLower === token0Lower ? v3PoolKey.token1 : v3PoolKey.token0;
+  const fee = v3PoolKey.fee;
 
   const identityVerificationBlock = identity.blockNumber;
-  const pairAddress = getAddress(identity.pool.pairAddress);
   const quoterAddress = getProtocolDeploymentAddress(rpc.chainId, "UNISWAP_V3", "quoter");
 
   let quoteBlockNumber: bigint;
@@ -151,59 +177,6 @@ export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUnisw
   }
 
   const evidence: QuoteEvidence[] = [];
-
-  let fee: number;
-  {
-    const raw = await rpc.call({ to: pairAddress, data: encodeFeeCall() }, quoteBlockNumber).then(
-      (value) => ({ outcome: "ok" as const, value }),
-      (error: unknown) => ({ outcome: "rpc_error" as const, error }),
-    );
-    if (raw.outcome === "rpc_error") {
-      evidence.push({
-        kind: "FEE_READ",
-        outcome: "rpc_error",
-        source: "pool.fee()",
-        detail: `RPC read failed: ${describeError(raw.error)}`,
-      });
-      return buildResult({
-        pool: identity.pool,
-        identityVerificationBlock,
-        quoteBlockNumber,
-        tokenIn,
-        tokenOut,
-        amountIn,
-        status: "RPC_ERROR",
-        evidence,
-      });
-    }
-    const decoded = decodeUint24Return(raw.value);
-    if (decoded === null) {
-      evidence.push({
-        kind: "FEE_READ",
-        outcome: "decode_error",
-        source: "pool.fee()",
-        detail: `Return data could not be decoded into a valid uint24 (raw: ${raw.value}).`,
-      });
-      return buildResult({
-        pool: identity.pool,
-        identityVerificationBlock,
-        quoteBlockNumber,
-        tokenIn,
-        tokenOut,
-        amountIn,
-        status: "INDETERMINATE",
-        evidence,
-      });
-    }
-    fee = decoded;
-    evidence.push({
-      kind: "FEE_READ",
-      outcome: "ok",
-      source: "pool.fee()",
-      observed: String(fee),
-      detail: "fee() decoded to a valid uint24 — used as a required QuoterV2 input, never caller-supplied.",
-    });
-  }
 
   const quoteData = encodeQuoteExactInputSingleV3Call(tokenIn, tokenOut, amountIn, fee);
   const outcome = await callQuoter(rpc, quoterAddress, quoteData, quoteBlockNumber);
@@ -294,6 +267,76 @@ export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUnisw
     amountOut: decoded.amountOut,
     metadata,
   });
+}
+
+/** See the module doc comment above `runV3QuoteCore` — this is an unchanged, behavior-preserving wrapper around it. */
+export async function quoteVerifiedUniswapV3ExactInput(input: QuoteVerifiedUniswapV3ExactInputInput): Promise<UniswapV3QuoteVerification> {
+  return runV3QuoteCore(input);
+}
+
+/**
+ * Phase 6E.2 — same-block execution analytics for an exact-input quote
+ * through one already identity-VERIFIED Uniswap V3 pool. Runs the exact
+ * same `runV3QuoteCore` as `quoteVerifiedUniswapV3ExactInput` (identical
+ * preconditions, identical single `eth_blockNumber` pin, identical
+ * `fee()`/`QuoterV2` calls) and, ONLY when that core result is `QUOTED`,
+ * additionally reads `pool.slot0()` (pre-trade spot) and `decimals()`
+ * for both `tokenIn`/`tokenOut` — all three pinned to the EXACT SAME
+ * `quoteBlockNumber` the core already established, via the already-
+ * returned result's own fields (`result.tokenIn`/`tokenOut`/`amountIn`/
+ * `amountOut`/`quoteBlockNumber`/`pool.pairAddress`). No second
+ * `eth_blockNumber` call is ever made — see `assembleQuoteAnalytics` in
+ * `./analytics.ts` for the shared math/orchestration.
+ *
+ * A non-`QUOTED` core result (including `RPC_ERROR`/`UNQUOTABLE`/
+ * `INDETERMINATE`) is returned completely unchanged, with no `analytics`
+ * field at all — there is no execution price to pair a spot reference
+ * with, and a valid `QUOTED` result is never downgraded because
+ * analytics could not be computed (the reverse also holds: analytics
+ * never rescues/upgrades a non-`QUOTED` result).
+ */
+export async function quoteVerifiedUniswapV3ExactInputWithAnalytics(
+  input: QuoteVerifiedUniswapV3ExactInputInput,
+): Promise<UniswapV3QuoteWithAnalytics> {
+  const result = await runV3QuoteCore(input);
+  if (result.status !== "QUOTED" || result.quoteBlockNumber === null || result.amountOut === undefined) {
+    return result;
+  }
+
+  const pairAddress = getAddress(result.pool.pairAddress);
+  const blockNumber = result.quoteBlockNumber;
+
+  const analytics = await assembleQuoteAnalytics({
+    rpc: input.rpc,
+    tokenIn: result.tokenIn,
+    tokenOut: result.tokenOut,
+    blockNumber,
+    tokenInIsToken0: result.tokenIn.toLowerCase() < result.tokenOut.toLowerCase(),
+    amountIn: result.amountIn,
+    amountOut: result.amountOut,
+    readSpotSqrtPriceX96: () => readV3SpotSqrtPriceX96(input.rpc, pairAddress, blockNumber),
+    spotEvidenceSource: "pool.slot0()",
+  });
+
+  return { ...result, analytics };
+}
+
+async function readV3SpotSqrtPriceX96(
+  rpc: VerifiedRobinhoodRpcClient,
+  pairAddress: Address,
+  blockNumber: bigint,
+): Promise<{ readonly outcome: "ok"; readonly value: bigint } | { readonly outcome: "rpc_error"; readonly detail: string } | { readonly outcome: "decode_error"; readonly detail: string }> {
+  let raw: Hex;
+  try {
+    raw = await rpc.call({ to: pairAddress, data: encodeSlot0Call() }, blockNumber);
+  } catch (error) {
+    return { outcome: "rpc_error", detail: describeError(error) };
+  }
+  const sqrtPriceX96 = decodeV3Slot0SqrtPriceX96(raw);
+  if (sqrtPriceX96 === null) {
+    return { outcome: "decode_error", detail: `slot0() return data could not be decoded into a valid 7-word tuple (raw: ${raw}).` };
+  }
+  return { outcome: "ok", value: sqrtPriceX96 };
 }
 
 function buildResult(args: {

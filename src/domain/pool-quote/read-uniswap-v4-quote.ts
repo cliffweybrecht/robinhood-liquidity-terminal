@@ -3,8 +3,9 @@ import type { LiquidityPool } from "@/domain/pool";
 import type { PoolIdentityVerification } from "@/domain/pool-verification";
 import { getProtocolDeploymentAddress } from "@/domain/pool-verification";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { decodeV4QuoteReturn } from "./abi/decode";
-import { encodeQuoteExactInputSingleV4Call } from "./abi/selectors";
+import { assembleQuoteAnalytics } from "./analytics";
+import { decodeV4QuoteReturn, decodeV4Slot0SqrtPriceX96 } from "./abi/decode";
+import { encodeGetSlot0Call, encodeQuoteExactInputSingleV4Call } from "./abi/selectors";
 import {
   IdentityNotVerifiedError,
   InvalidAmountInError,
@@ -16,7 +17,7 @@ import {
   UnsupportedIdentityFamilyError,
 } from "./errors";
 import { callQuoter, classifyRevert, describeError } from "./read";
-import type { QuoteEvidence, QuoteStatus, UniswapV4QuoteMetadata, UniswapV4QuoteVerification } from "./types";
+import type { QuoteEvidence, QuoteStatus, UniswapV4QuoteMetadata, UniswapV4QuoteVerification, UniswapV4QuoteWithAnalytics } from "./types";
 
 const UINT128_MAX = (1n << 128n) - 1n;
 
@@ -97,7 +98,19 @@ export interface QuoteVerifiedUniswapV4ExactInputInput {
  * itself (via the real `beforeSwap` path) rather than trusting any
  * previously-read value.
  */
-export async function quoteVerifiedUniswapV4ExactInput(input: QuoteVerifiedUniswapV4ExactInputInput): Promise<UniswapV4QuoteVerification> {
+/**
+ * Preconditions + hookData resolution + block pin + the single canonical
+ * `V4Quoter.quoteExactInputSingle` call — the exact same trust-critical
+ * logic `quoteVerifiedUniswapV4ExactInput` has always run. Extracted
+ * (Phase 6E.2) into a private, unexported core so
+ * `quoteVerifiedUniswapV4ExactInputWithAnalytics` can reuse it byte-for-
+ * byte rather than duplicating any precondition or revert-classification
+ * logic — the public `quoteVerifiedUniswapV4ExactInput` below is now a
+ * one-line wrapper around this function, with IDENTICAL observable
+ * behavior to before Phase 6E.2 (verified by Phase 6E.1's full existing
+ * test suite passing unmodified). Never exported from `index.ts`.
+ */
+async function runV4QuoteCore(input: QuoteVerifiedUniswapV4ExactInputInput): Promise<UniswapV4QuoteVerification> {
   const { pool, identity, tokenIn, amountIn, rpc, hookData: callerHookData } = input;
 
   if (identity.pool.chainId !== pool.chainId || identity.pool.pairAddress.toLowerCase() !== pool.pairAddress.toLowerCase()) {
@@ -272,6 +285,88 @@ export async function quoteVerifiedUniswapV4ExactInput(input: QuoteVerifiedUnisw
     amountOut: decoded.amountOut,
     metadata,
   });
+}
+
+/** See the module doc comment above `runV4QuoteCore` — this is an unchanged, behavior-preserving wrapper around it. */
+export async function quoteVerifiedUniswapV4ExactInput(input: QuoteVerifiedUniswapV4ExactInputInput): Promise<UniswapV4QuoteVerification> {
+  return runV4QuoteCore(input);
+}
+
+/**
+ * Phase 6E.2 — same-block execution analytics for an exact-input quote
+ * through one already identity-VERIFIED Uniswap V4 pool. Runs the exact
+ * same `runV4QuoteCore` as `quoteVerifiedUniswapV4ExactInput` (identical
+ * preconditions, identical hookData fail-closed resolution, identical
+ * single `eth_blockNumber` pin, identical `V4Quoter` call) and, ONLY
+ * when that core result is `QUOTED`, additionally reads the canonical
+ * `StateView.getSlot0(poolId)` (pre-trade spot) and `decimals()` for
+ * both `tokenIn`/`tokenOut` — all pinned to the EXACT SAME
+ * `quoteBlockNumber` the core already established. No second
+ * `eth_blockNumber` call is ever made. `StateView`'s address is resolved
+ * through the same canonical protocol deployment registry already used
+ * for the `"quoter"` role (no new cross-module dependency — the
+ * `"state_view"` role already exists there, established in Phase 6D.2).
+ *
+ * `tokenInIsToken0` is derived from the already-verified typed
+ * `poolKey.currency0` (Phase 6C.2), never re-derived from an untrusted
+ * source. A non-`QUOTED` core result is returned completely unchanged,
+ * with no `analytics` field — see the identical reasoning on
+ * `quoteVerifiedUniswapV3ExactInputWithAnalytics`.
+ */
+export async function quoteVerifiedUniswapV4ExactInputWithAnalytics(
+  input: QuoteVerifiedUniswapV4ExactInputInput,
+): Promise<UniswapV4QuoteWithAnalytics> {
+  const result = await runV4QuoteCore(input);
+  if (result.status !== "QUOTED" || result.quoteBlockNumber === null || result.amountOut === undefined) {
+    return result;
+  }
+
+  const poolKey = input.identity.poolKey;
+  if (poolKey === null || poolKey === undefined) {
+    // Unreachable in practice — a QUOTED core result already required a
+    // non-null poolKey (MissingVerifiedPoolKeyError otherwise) — but
+    // re-checked defensively rather than trusted, matching this
+    // module's established style.
+    return result;
+  }
+
+  const poolId = result.pool.pairAddress;
+  const stateViewAddress = getProtocolDeploymentAddress(input.rpc.chainId, "UNISWAP_V4", "state_view");
+  const blockNumber = result.quoteBlockNumber;
+  const tokenInIsToken0 = result.tokenIn.toLowerCase() === poolKey.currency0.toLowerCase();
+
+  const analytics = await assembleQuoteAnalytics({
+    rpc: input.rpc,
+    tokenIn: result.tokenIn,
+    tokenOut: result.tokenOut,
+    blockNumber,
+    tokenInIsToken0,
+    amountIn: result.amountIn,
+    amountOut: result.amountOut,
+    readSpotSqrtPriceX96: () => readV4SpotSqrtPriceX96(input.rpc, stateViewAddress, poolId, blockNumber),
+    spotEvidenceSource: "StateView.getSlot0(poolId)",
+  });
+
+  return { ...result, analytics };
+}
+
+async function readV4SpotSqrtPriceX96(
+  rpc: VerifiedRobinhoodRpcClient,
+  stateViewAddress: Address,
+  poolId: Hex,
+  blockNumber: bigint,
+): Promise<{ readonly outcome: "ok"; readonly value: bigint } | { readonly outcome: "rpc_error"; readonly detail: string } | { readonly outcome: "decode_error"; readonly detail: string }> {
+  let raw: Hex;
+  try {
+    raw = await rpc.call({ to: stateViewAddress, data: encodeGetSlot0Call(poolId) }, blockNumber);
+  } catch (error) {
+    return { outcome: "rpc_error", detail: describeError(error) };
+  }
+  const sqrtPriceX96 = decodeV4Slot0SqrtPriceX96(raw);
+  if (sqrtPriceX96 === null) {
+    return { outcome: "decode_error", detail: `StateView.getSlot0(poolId) return data could not be decoded into a valid 4-word tuple (raw: ${raw}).` };
+  }
+  return { outcome: "ok", value: sqrtPriceX96 };
 }
 
 function buildResult(args: {

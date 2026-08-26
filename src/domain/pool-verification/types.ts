@@ -124,6 +124,31 @@ export interface VerifiedV4PoolKey {
   readonly hooks: Address;
 }
 
+/**
+ * The immutable Uniswap V3 pool-identity facts already proven during
+ * identity verification (`strategies/uniswap-v3.ts`): `token0()`/
+ * `token1()`/`fee()`, independently read on-chain and cryptographically
+ * confirmed (via the canonical factory's `getPool(token0, token1, fee)`
+ * lookup) to reproduce the exact discovered pool address. Exposed here
+ * as the SAME values already read during verification — never re-
+ * derived, never re-read, never taken from the caller-supplied
+ * `LiquidityPool`'s `baseToken`/`quoteToken` fields (which are only
+ * provider-reported, not identity-verified — see `pool/types.ts`) — so a
+ * later consumer (Phase 6E's V3 quote path) has trustworthy typed access
+ * to `token0`/`token1`/`fee` without trusting an unverified caller-
+ * supplied token pair. Present only when `status === "VERIFIED"` and
+ * `family === "UNISWAP_V3"` — `null`/absent otherwise, including for a
+ * V3 result that reached `CONTRADICTED` (a contradicted identity's
+ * token0/token1/fee are not "the verified facts for this pool"), for
+ * exactly the same reason `VerifiedV4PoolKey` is withheld on a
+ * `CONTRADICTED` V4 result.
+ */
+export interface VerifiedV3PoolKey {
+  readonly token0: Address;
+  readonly token1: Address;
+  readonly fee: number;
+}
+
 export interface PoolIdentityVerification {
   readonly pool: ClassifiedPoolIdentity;
   readonly family: ProtocolFamily;
@@ -133,5 +158,7 @@ export interface PoolIdentityVerification {
   readonly historicalProvenance?: HistoricalPoolProvenance | null;
   /** Present only for a `VERIFIED` `UNISWAP_V4` result — see `VerifiedV4PoolKey`'s doc comment. */
   readonly poolKey?: VerifiedV4PoolKey | null;
+  /** Present only for a `VERIFIED` `UNISWAP_V3` result — see `VerifiedV3PoolKey`'s doc comment. Deliberately a separate field from `poolKey`, never a shared/overloaded shape — V3's identity facts (`token0`/`token1`/`fee`) and V4's (`currency0`/`currency1`/`fee`/`tickSpacing`/`hooks`) are structurally different and independently proven. */
+  readonly v3PoolKey?: VerifiedV3PoolKey | null;
   readonly evidence: readonly PoolVerificationEvidence[];
 }

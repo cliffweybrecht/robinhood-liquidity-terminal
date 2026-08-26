@@ -87,14 +87,14 @@ describe.skipIf(!RUN_LIVE)("Phase 6E.1 verified Uniswap V3 exact-input quote (li
         console.log(`  [${e.kind}] outcome=${e.outcome} observed=${e.observed ?? "-"} :: ${e.detail}`);
       }
       console.log(`eth_blockNumber calls: ${blockNumberCalls}`);
-      console.log(`total eth_call count: ${quoteCalls.length} (fee() supporting read + one canonical quoter call)`);
+      console.log(`total eth_call count: ${quoteCalls.length} (one canonical quoter call — fee is now a typed, already-verified identity fact, no live fee() read)`);
 
       // Block pinning discipline: getBlockNumber exactly once.
       expect(blockNumberCalls).toBe(1);
-      // Every eth_call (fee() + the single quoter call) used the exact same pinned block.
-      expect(quoteCalls.length).toBeGreaterThan(0);
+      // Exactly one eth_call total — the quoter call — using the pinned block.
+      expect(quoteCalls).toHaveLength(1);
       for (const c of quoteCalls) expect(c.blockTag).toBe(result.quoteBlockNumber);
-      // Exactly one call actually went to the canonical quoter contract.
+      // That one call went to the canonical quoter contract.
       const quoterCalls = quoteCalls.filter((c) => c.to.toLowerCase() === "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7");
       expect(quoterCalls).toHaveLength(1);
 

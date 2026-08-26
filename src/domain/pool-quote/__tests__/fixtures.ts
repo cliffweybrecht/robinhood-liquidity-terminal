@@ -3,7 +3,14 @@ import type { LiquidityPool } from "@/domain/pool";
 import type { PoolIdentityVerification } from "@/domain/pool-verification";
 import { RobinhoodRpcErrorResponseError } from "@/providers/robinhood-rpc";
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
-import { encodeFeeCall, encodeQuoteExactInputSingleV3Call, encodeQuoteExactInputSingleV4Call } from "../abi/selectors";
+import {
+  encodeDecimalsCall,
+  encodeFeeCall,
+  encodeGetSlot0Call,
+  encodeQuoteExactInputSingleV3Call,
+  encodeQuoteExactInputSingleV4Call,
+  encodeSlot0Call,
+} from "../abi/selectors";
 
 // Real address forms reused verbatim from earlier phases' test fixtures
 // for consistency, not invented shapes. Deliberately duplicated here
@@ -25,6 +32,20 @@ export const QUOTE_BLOCK = 22222n;
 export const DEFAULT_FEE = 500;
 export const DEFAULT_TICK_SPACING = 10;
 export const DEFAULT_AMOUNT_IN = 1000000000000000n; // 0.001, 18 decimals
+
+/** Realistic-shaped default decimals per fixture token — NVDA/WETH 18dp, USDG 6dp, matching the real tokens these addresses stand in for (confirmed live during Phase 6E.2 architecture research). Deliberately NOT all 18 — a test suite that defaulted everything to 18 could never catch a decimal-exponent-direction bug. */
+export const DEFAULT_DECIMALS_BY_ADDRESS: Readonly<Record<string, number>> = {
+  [NVDA.toLowerCase()]: 18,
+  [WETH.toLowerCase()]: 18,
+  [USDG.toLowerCase()]: 6,
+  [OTHER_TOKEN.toLowerCase()]: 18,
+};
+
+/** Default same-block spot `sqrtPriceX96` for the V3 fixture pool (NVDA/USDG) — an arbitrary but realistic-magnitude value, independent of `DEFAULT_V3_QUOTE`'s `sqrtPriceX96After`. */
+export const DEFAULT_V3_SPOT_SQRT_PRICE_X96 = 5418750556201755922889773763153732n;
+
+/** Default same-block spot `sqrtPriceX96` for the V4 fixture pool (WETH/NVDA). */
+export const DEFAULT_V4_SPOT_SQRT_PRICE_X96 = 269234746747521882635919524086n;
 
 function uintWord(value: bigint): string {
   return value.toString(16).padStart(64, "0");
@@ -75,6 +96,73 @@ export function v4QuoteReturn(overrides: Partial<V4QuoteFields> = {}): Hex {
 /** A raw word with a value exceeding a given bit width — for malformed "dirty high bits" tests. */
 export function oversizedWord(): string {
   return "f".repeat(64);
+}
+
+/** ERC20 `decimals()`'s single-word `uint8` return. */
+export function decimalsReturn(decimals: number): Hex {
+  return `0x${uintWord(BigInt(decimals))}` as Hex;
+}
+
+export interface Slot0V3Fields {
+  sqrtPriceX96: bigint;
+  tick: number;
+  observationIndex: number;
+  observationCardinality: number;
+  observationCardinalityNext: number;
+  feeProtocol: number;
+  unlocked: boolean;
+}
+
+export const DEFAULT_SLOT0_V3: Slot0V3Fields = {
+  sqrtPriceX96: DEFAULT_V3_SPOT_SQRT_PRICE_X96,
+  tick: 222709,
+  observationIndex: 0,
+  observationCardinality: 1,
+  observationCardinalityNext: 1,
+  feeProtocol: 0,
+  unlocked: true,
+};
+
+function intWord(value: number): string {
+  const v = BigInt(value);
+  const unsigned = v < 0n ? v + (1n << 256n) : v;
+  return unsigned.toString(16).padStart(64, "0");
+}
+
+/** V3 pool `slot0()`'s full 7-word return. */
+export function slot0V3Return(overrides: Partial<Slot0V3Fields> = {}): Hex {
+  const f = { ...DEFAULT_SLOT0_V3, ...overrides };
+  const words = [
+    uintWord(f.sqrtPriceX96),
+    intWord(f.tick),
+    uintWord(BigInt(f.observationIndex)),
+    uintWord(BigInt(f.observationCardinality)),
+    uintWord(BigInt(f.observationCardinalityNext)),
+    uintWord(BigInt(f.feeProtocol)),
+    uintWord(f.unlocked ? 1n : 0n),
+  ].join("");
+  return `0x${words}` as Hex;
+}
+
+export interface Slot0V4Fields {
+  sqrtPriceX96: bigint;
+  tick: number;
+  protocolFee: number;
+  lpFee: number;
+}
+
+export const DEFAULT_SLOT0_V4: Slot0V4Fields = {
+  sqrtPriceX96: DEFAULT_V4_SPOT_SQRT_PRICE_X96,
+  tick: 46054,
+  protocolFee: 0,
+  lpFee: 8388608,
+};
+
+/** V4 `StateView.getSlot0(poolId)`'s full 4-word return. */
+export function slot0V4Return(overrides: Partial<Slot0V4Fields> = {}): Hex {
+  const f = { ...DEFAULT_SLOT0_V4, ...overrides };
+  const words = [uintWord(f.sqrtPriceX96), intWord(f.tick), uintWord(BigInt(f.protocolFee)), uintWord(BigInt(f.lpFee))].join("");
+  return `0x${words}` as Hex;
 }
 
 /** Builds a well-formed `Error(string)` revert payload for an arbitrary UTF-8 reason string. */
@@ -135,11 +223,34 @@ export function pool(overrides: Partial<LiquidityPool> = {}): LiquidityPool {
   };
 }
 
+export interface V3PoolKeyFields {
+  token0: Address;
+  token1: Address;
+  fee: number;
+}
+
+/**
+ * Matches `pool()`'s default `baseToken=NVDA`/`quoteToken=USDG` — the
+ * SAME independently-verified token0/token1/fee `strategies/uniswap-v3.ts`
+ * would have populated for this fixture pool. Deliberately NOT derived
+ * from `pool.baseToken`/`pool.quoteToken` at call time (that would defeat
+ * the point of the spoof-resistance tests, which construct a `pool`
+ * object with DELIBERATELY altered `baseToken`/`quoteToken` while
+ * `v3PoolKey` stays fixed to the genuinely-verified pair).
+ */
+export const DEFAULT_V3_POOL_KEY: V3PoolKeyFields = {
+  token0: NVDA,
+  token1: USDG,
+  fee: DEFAULT_FEE,
+};
+
 export function verifiedV3Identity(
   poolOverrides: Partial<LiquidityPool> = {},
   identityOverrides: Partial<Omit<PoolIdentityVerification, "pool">> = {},
+  poolKeyOverrides: Partial<V3PoolKeyFields> = {},
 ): { pool: LiquidityPool; identity: PoolIdentityVerification } {
   const p = pool(poolOverrides);
+  const v3PoolKey = { ...DEFAULT_V3_POOL_KEY, ...poolKeyOverrides };
   const identity: PoolIdentityVerification = {
     pool: {
       chainId: p.chainId,
@@ -153,6 +264,7 @@ export function verifiedV3Identity(
     classificationStatus: "CLASSIFIED",
     status: "VERIFIED",
     blockNumber: IDENTITY_BLOCK,
+    v3PoolKey,
     evidence: [],
     ...identityOverrides,
   };
@@ -233,6 +345,10 @@ export interface FakeRpcStubs {
   readonly fee?: RpcStub;
   readonly v3Quote?: RpcStub;
   readonly v4Quote?: RpcStub;
+  /** V3 `pool.slot0()` / V4 `StateView.getSlot0(poolId)` — selector-routed, so one stub covers whichever of the two a given quote path actually calls. */
+  readonly slot0?: RpcStub;
+  /** `decimals()` per token address (lowercased) — `decimals()`'s calldata is identical regardless of which token is called, so this MUST be routed by `to`, not by selector alone. Unset addresses fall back to `DEFAULT_DECIMALS_BY_ADDRESS`. */
+  readonly decimalsByAddress?: Readonly<Record<string, RpcStub>>;
 }
 
 export interface FakeRpcCallLog {
@@ -256,6 +372,9 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
   const feeSelector = encodeFeeCall().slice(0, 10);
   const v3QuoteSelector = encodeQuoteExactInputSingleV3Call(NVDA, USDG, DEFAULT_AMOUNT_IN, DEFAULT_FEE).slice(0, 10);
   const v4QuoteSelector = encodeQuoteExactInputSingleV4Call(DEFAULT_V4_POOL_KEY, true, DEFAULT_AMOUNT_IN, "0x").slice(0, 10);
+  const slot0Selector = encodeSlot0Call().slice(0, 10);
+  const getSlot0Selector = encodeGetSlot0Call(V4_POOL_ID).slice(0, 10);
+  const decimalsSelector = encodeDecimalsCall().slice(0, 10);
 
   const rpc: VerifiedRobinhoodRpcClient = {
     chainId: stubs.chainId ?? 4663,
@@ -265,7 +384,7 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       return stubs.getBlockNumber ? (stubs.getBlockNumber as () => Promise<bigint>)() : QUOTE_BLOCK;
     },
     getCode: async () => {
-      throw new Error("unstubbed fake RPC call: getCode (not used by Phase 6E.1 quote reads)");
+      throw new Error("unstubbed fake RPC call: getCode (not used by Phase 6E.1/6E.2 quote reads)");
     },
     call: async (request, blockTag) => {
       calls.callCalls.push({ to: request.to, data: request.data, blockTag });
@@ -273,10 +392,24 @@ export function buildFakeRpc(stubs: FakeRpcStubs = {}): { rpc: VerifiedRobinhood
       if (selector === feeSelector) return feeFn();
       if (selector === v3QuoteSelector) return v3QuoteFn();
       if (selector === v4QuoteSelector) return v4QuoteFn();
+      // Same override (`stubs.slot0`) applies to whichever of the two a
+      // given quote path actually calls — a V3 read never calls
+      // `getSlot0`, a V4 read never calls `slot0`, so there is no real
+      // ambiguity in practice — but the protocol-correct SHAPE differs
+      // (7-word vs 4-word), so each selector still needs its own default.
+      if (selector === slot0Selector) return toFn(stubs.slot0, slot0V3Return())();
+      if (selector === getSlot0Selector) return toFn(stubs.slot0, slot0V4Return())();
+      if (selector === decimalsSelector) {
+        const key = request.to.toLowerCase();
+        const stub = stubs.decimalsByAddress?.[key];
+        if (stub !== undefined) return toFn(stub, decimalsReturn(18))();
+        const fallback = DEFAULT_DECIMALS_BY_ADDRESS[key];
+        return decimalsReturn(fallback ?? 18);
+      }
       throw new Error(`unstubbed fake RPC call: to=${request.to} data=${request.data}`);
     },
     getLogs: async () => {
-      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6E.1 quote reads)");
+      throw new Error("unstubbed fake RPC call: getLogs (not used by Phase 6E.1/6E.2 quote reads)");
     },
   };
 

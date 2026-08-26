@@ -49,7 +49,13 @@ export type QuoteStatus = "QUOTED" | "UNQUOTABLE" | "INDETERMINATE" | "RPC_ERROR
 /** Whether one piece of quote evidence reflects a clean success, a transport failure, a decode failure, or a positively-classified protocol-level "cannot execute" outcome. */
 export type QuoteEvidenceOutcome = "ok" | "rpc_error" | "decode_error" | "unquotable" | "disclosed";
 
-export type QuoteEvidenceKind = "BLOCK_PIN_FAILURE" | "FEE_READ" | "QUOTE_CALL" | "HOOK_DATA_DISCLOSURE";
+export type QuoteEvidenceKind =
+  | "BLOCK_PIN_FAILURE"
+  | "FEE_READ"
+  | "QUOTE_CALL"
+  | "HOOK_DATA_DISCLOSURE"
+  | "DECIMALS_READ"
+  | "SPOT_READ";
 
 /** One piece of structured, machine-readable evidence for a single step of a quote attempt. */
 export interface QuoteEvidence {
@@ -126,3 +132,90 @@ export interface UniswapV4QuoteVerification extends QuoteVerificationBase {
  * of a caller genuinely handling either result generically.
  */
 export type QuoteVerification = UniswapV3QuoteVerification | UniswapV4QuoteVerification;
+
+/**
+ * Phase 6E.2 — an exact machine-readable rational number, `numerator /
+ * denominator`. Always the authoritative representation for every price/
+ * impact value this module computes: never reduced to lowest terms
+ * (computing a `gcd` on every value would add complexity for no
+ * behavioral benefit — `bigint` arithmetic never overflows, so an
+ * unreduced fraction is exactly as usable as a reduced one for any
+ * further exact computation), never converted to a floating-point
+ * `number`, and never pre-formatted as a display string — formatting/
+ * rounding/truncation policy belongs at a later presentation/API/UI
+ * boundary, not in this domain type. `denominator` is always `> 0n`.
+ */
+export interface RationalValue {
+  readonly numerator: bigint;
+  readonly denominator: bigint;
+}
+
+/**
+ * Independent from `QuoteStatus` — analytics can fail while the
+ * underlying canonical quote remains fully valid and `QUOTED`. Reuses
+ * `QuoteStatus`'s existing failure vocabulary rather than inventing new
+ * words for the same underlying failure categories:
+ *  - `OK`: both `decimals()` reads and the pre-trade spot read all
+ *    transport-succeeded, strictly decoded, and (for the spot read)
+ *    `sqrtPriceX96 !== 0`.
+ *  - `INDETERMINATE`: every required read completed at the transport
+ *    level, but at least one return could not be strictly decoded, or
+ *    the spot read decoded to a structurally valid but semantically
+ *    impossible `sqrtPriceX96 === 0` on an already-VERIFIED pool.
+ *  - `RPC_ERROR`: a transport/infrastructure failure prevented at least
+ *    one of the required analytics reads from completing at all.
+ * Deliberately no `UNQUOTABLE` analog — there is no protocol-level
+ * revert-classification concept for a `decimals()`/spot-state read.
+ */
+export type QuoteAnalyticsStatus = "OK" | "INDETERMINATE" | "RPC_ERROR";
+
+/**
+ * Same-block execution analytics for an exact-input quote that already
+ * reached `QUOTED` — never computed/exposed for any other base quote
+ * status (see `UniswapV3QuoteWithAnalytics`/`UniswapV4QuoteWithAnalytics`).
+ * Every price value is oriented `tokenOut per tokenIn` (`priceUnit`,
+ * always present, always this one fixed value — no ambiguous scalar is
+ * ever returned without it).
+ *
+ * `priceImpactBps` is signed: positive means execution was worse than
+ * the same-block pre-trade spot price, negative means better, zero means
+ * equal. Never clamped — a genuinely negative (favorable) result is
+ * returned as computed, since nothing about this codebase's V4 hook
+ * architecture guarantees execution can never beat pre-trade spot for an
+ * arbitrary hook.
+ *
+ * For a V4 hooked pool, `priceImpactBps` reflects "execution impact vs
+ * pre-trade pool spot" — the canonical `V4Quoter` simulation's
+ * `amountOut` already includes whatever the real hook actually did
+ * (dynamic fee override, custom swap behavior, hook-returned deltas), in
+ * addition to ordinary LP fee/protocol fee/AMM curve movement. This
+ * value is NEVER "pure AMM slippage," "isolated price slippage," or
+ * "isolated fee impact" — it is the honest end-to-end comparison between
+ * what this specific verified pool's canonical quoter actually returned
+ * and what its own state showed immediately before, at the same block.
+ */
+export interface QuoteAnalytics {
+  readonly status: QuoteAnalyticsStatus;
+  /** Present only when `status === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `status === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  /** Present only when `status === "OK"`. Same-block pre-trade pool spot price, `tokenOut` per `tokenIn`. */
+  readonly spotPrice?: RationalValue;
+  /** Present only when `status === "OK"`. Normalized execution price, `tokenOut` per `tokenIn`. */
+  readonly executionPrice?: RationalValue;
+  /** Present only when `status === "OK"`. Signed; see interface doc comment above. */
+  readonly priceImpactBps?: RationalValue;
+  readonly priceUnit: "tokenOut_per_tokenIn";
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/** The result of `quoteVerifiedUniswapV3ExactInputWithAnalytics` — `analytics` is present only when `status === "QUOTED"`. */
+export interface UniswapV3QuoteWithAnalytics extends UniswapV3QuoteVerification {
+  readonly analytics?: QuoteAnalytics;
+}
+
+/** The result of `quoteVerifiedUniswapV4ExactInputWithAnalytics` — `analytics` is present only when `status === "QUOTED"`. */
+export interface UniswapV4QuoteWithAnalytics extends UniswapV4QuoteVerification {
+  readonly analytics?: QuoteAnalytics;
+}
