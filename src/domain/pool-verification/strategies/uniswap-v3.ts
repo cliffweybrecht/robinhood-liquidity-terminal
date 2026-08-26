@@ -4,7 +4,7 @@ import type { ClassifiedPoolIdentity, PoolProtocolClassification } from "@/domai
 import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
 import { encodeFactoryCall, encodeFeeCall, encodeGetPoolCall, encodeToken0Call, encodeToken1Call } from "../abi/selectors";
 import { describeError, readAddress, readUint24, type ReadResult } from "../read";
-import type { PoolIdentityVerification, PoolVerificationEvidence, PoolVerificationStatus } from "../types";
+import type { PoolIdentityVerification, PoolVerificationEvidence, PoolVerificationStatus, VerifiedV3PoolKey } from "../types";
 
 export interface VerifyUniswapV3Args {
   readonly pool: LiquidityPool;
@@ -230,12 +230,22 @@ export async function verifyUniswapV3PoolIdentity(args: VerifyUniswapV3Args): Pr
         ? "INDETERMINATE"
         : "VERIFIED";
 
+  // Only a genuinely VERIFIED result exposes token0/token1/fee as
+  // trusted — the SAME values already independently read above and
+  // cryptographically confirmed via the canonical factory lookup, never
+  // re-derived, never taken from the caller-supplied LiquidityPool.
+  const v3PoolKey: VerifiedV3PoolKey | null =
+    status === "VERIFIED" && token0Result.outcome === "ok" && token1Result.outcome === "ok" && feeResult.outcome === "ok"
+      ? { token0: token0Result.value, token1: token1Result.value, fee: feeResult.value }
+      : null;
+
   return {
     pool: identity,
     family: classification.family,
     classificationStatus: classification.status,
     status,
     blockNumber,
+    v3PoolKey,
     evidence,
   };
 }

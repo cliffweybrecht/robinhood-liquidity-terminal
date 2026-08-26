@@ -110,3 +110,55 @@ export function encodeQuoteExactInputSingleV4Call(
     args: [{ poolKey, zeroForOne, exactAmount, hookData }],
   });
 }
+
+/** Standard ERC20 `decimals()` — used for both `tokenIn`/`tokenOut` in Phase 6E.2's execution analytics, never assumed/inferred. */
+const erc20Abi = [{ type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const;
+
+export function encodeDecimalsCall(): Hex {
+  return encodeFunctionData({ abi: erc20Abi, functionName: "decimals" });
+}
+
+/**
+ * Uniswap V3 pool `slot0()` — re-declared here (not imported from
+ * `pool-state/abi/selectors.ts`) for the same module-independence reason
+ * `encodeFeeCall` above already documents. Full 7-output signature
+ * required for viem's selector computation to match the real function
+ * even though `abi/decode.ts`'s `decodeV3Slot0SqrtPriceX96` only
+ * surfaces the first word.
+ */
+const v3PoolSlot0Abi = [
+  {
+    type: "function",
+    name: "slot0",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { type: "uint160" },
+      { type: "int24" },
+      { type: "uint16" },
+      { type: "uint16" },
+      { type: "uint16" },
+      { type: "uint8" },
+      { type: "bool" },
+    ],
+  },
+] as const;
+
+export function encodeSlot0Call(): Hex {
+  return encodeFunctionData({ abi: v3PoolSlot0Abi, functionName: "slot0" });
+}
+
+/** Canonical `StateView.getSlot0(poolId)` (Uniswap V4 periphery lens contract). `PoolId` ABI-encodes as exactly one `bytes32` word. */
+const v4StateViewAbi = [
+  {
+    type: "function",
+    name: "getSlot0",
+    stateMutability: "view",
+    inputs: [{ type: "bytes32" }],
+    outputs: [{ type: "uint160" }, { type: "int24" }, { type: "uint24" }, { type: "uint24" }],
+  },
+] as const;
+
+export function encodeGetSlot0Call(poolId: Hex): Hex {
+  return encodeFunctionData({ abi: v4StateViewAbi, functionName: "getSlot0", args: [poolId] });
+}

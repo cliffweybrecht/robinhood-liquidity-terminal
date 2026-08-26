@@ -12,6 +12,7 @@ export type {
   PoolVerificationEvidenceKind,
   PoolVerificationEvidenceSupport,
   PoolVerificationStatus,
+  VerifiedV3PoolKey,
   VerifiedV4PoolKey,
 } from "./types";
 export {

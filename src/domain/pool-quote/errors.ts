@@ -17,6 +17,7 @@ export type QuotePreconditionErrorCode =
   | "INVALID_AMOUNT_IN"
   | "INVALID_TOKEN_IN"
   | "MISSING_VERIFIED_POOL_KEY"
+  | "MISSING_VERIFIED_V3_POOL_KEY"
   | "MISSING_HOOK_DATA";
 
 export abstract class QuotePreconditionError extends Error {
@@ -106,6 +107,29 @@ export class MissingVerifiedPoolKeyError extends QuotePreconditionError {
   constructor() {
     super("identity.poolKey is missing on a VERIFIED UNISWAP_V4 identity — refusing to construct a quote without a trustworthy typed PoolKey");
     this.name = "MissingVerifiedPoolKeyError";
+  }
+}
+
+/**
+ * V3 only: `identity.v3PoolKey` is missing on a `VERIFIED`/`UNISWAP_V3`
+ * identity. Should be unreachable — `strategies/uniswap-v3.ts` always
+ * populates `v3PoolKey` for a genuinely `VERIFIED` V3 result — but
+ * re-checked explicitly rather than trusted, same defensive pattern as
+ * `MissingVerifiedPoolKeyError` above. Critically, this is also the
+ * fail-closed backstop that makes it impossible to construct a quote
+ * from a caller-supplied `LiquidityPool`'s (unverified, provider-
+ * reported) `baseToken`/`quoteToken` fields instead of the independently
+ * on-chain-proven `token0`/`token1`/`fee` — a `VERIFIED` identity without
+ * this typed fact can never reach the quoter call.
+ */
+export class MissingVerifiedV3PoolKeyError extends QuotePreconditionError {
+  readonly code = "MISSING_VERIFIED_V3_POOL_KEY" as const;
+
+  constructor() {
+    super(
+      "identity.v3PoolKey is missing on a VERIFIED UNISWAP_V3 identity — refusing to construct a quote without the independently on-chain-verified token0/token1/fee",
+    );
+    this.name = "MissingVerifiedV3PoolKeyError";
   }
 }
 

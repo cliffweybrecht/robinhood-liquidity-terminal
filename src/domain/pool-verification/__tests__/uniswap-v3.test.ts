@@ -5,6 +5,7 @@ import {
   buildFakeRpc,
   CANONICAL_FACTORY,
   classifiedPool,
+  FEE_TIER,
   NVDA,
   OTHER_POOL_ADDRESS,
   uint24Return,
@@ -39,6 +40,19 @@ describe("Uniswap V3 verification — VERIFIED path", () => {
     expect(lookupCall).toBeDefined();
   });
 
+  it("exposes v3PoolKey (token0/token1/fee) exactly matching the values already proven via the canonical factory lookup — never re-derived, never re-read", async () => {
+    const { pool, classification } = classifiedPool();
+    const { rpc } = buildFakeRpc();
+
+    const result = await verifyPoolIdentity({ pool, classification, rpc });
+
+    expect(result.status).toBe("VERIFIED");
+    expect(result.v3PoolKey).toEqual({ token0: NVDA, token1: USDG, fee: FEE_TIER });
+    // Exactly the same values the FACTORY_POOL_LOOKUP evidence's canonical proof used as input.
+    const feeEvidence = result.evidence.find((e) => e.kind === "FEE_READ");
+    expect(feeEvidence?.observed).toBe(String(FEE_TIER));
+  });
+
   it("matches the pair regardless of on-chain token0/token1 orientation vs discovered base/quote orientation", async () => {
     // discovered baseToken=NVDA, quoteToken=USDG; on-chain token0=USDG, token1=NVDA (swapped)
     const { pool, classification } = classifiedPool();
@@ -59,6 +73,8 @@ describe("Uniswap V3 verification — CONTRADICTED", () => {
 
     expect(result.status).toBe("CONTRADICTED");
     expect(result.evidence.find((e) => e.kind === "TOKEN_PAIR_MATCH")?.support).toBe("CONTRADICTS");
+    // A CONTRADICTED identity's token0/token1/fee are NOT exposed as "the verified facts for this pool".
+    expect(result.v3PoolKey).toBeNull();
   });
 
   it("contradicts on a token1/pair mismatch", async () => {
@@ -69,6 +85,7 @@ describe("Uniswap V3 verification — CONTRADICTED", () => {
 
     expect(result.status).toBe("CONTRADICTED");
     expect(result.evidence.find((e) => e.kind === "TOKEN_PAIR_MATCH")?.support).toBe("CONTRADICTS");
+    expect(result.v3PoolKey).toBeNull();
   });
 
   it("contradicts when the canonical asset address is absent from the on-chain pair", async () => {
@@ -129,6 +146,7 @@ describe("Uniswap V3 verification — read failures (RPC_ERROR)", () => {
     const result = await verifyPoolIdentity({ pool, classification, rpc });
     expect(result.status).toBe("RPC_ERROR");
     expect(result.evidence.find((e) => e.kind === "TOKEN0_READ")?.detail).toMatch(/RPC read failed/);
+    expect(result.v3PoolKey).toBeNull();
   });
 
   it("returns RPC_ERROR when token1() fails", async () => {
@@ -175,6 +193,7 @@ describe("Uniswap V3 verification — decode/structural failures (INDETERMINATE)
     expect(result.status).toBe("INDETERMINATE");
     const token0Evidence = result.evidence.find((e) => e.kind === "TOKEN0_READ");
     expect(token0Evidence?.support).toBe("NEUTRAL");
+    expect(result.v3PoolKey).toBeNull();
   });
 
   it("treats a malformed factory address return (non-zero padding) as INDETERMINATE", async () => {
