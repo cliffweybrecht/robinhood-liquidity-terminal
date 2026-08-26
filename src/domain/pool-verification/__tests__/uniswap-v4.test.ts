@@ -152,6 +152,22 @@ describe("Uniswap V4 verification — VERIFIED path", () => {
     expect(calls.callCalls).toHaveLength(0);
   });
 
+  it("exposes the typed, verified PoolKey matching the reconstructed Initialize event — the same values already proven above, not re-derived", async () => {
+    const { pool, classification } = classifiedV4Pool();
+    const { rpc } = buildFakeRpc({ getLogs: [v4InitializeLog()] });
+
+    const result = await verifyPoolIdentity({ pool, classification, rpc });
+
+    expect(result.status).toBe("VERIFIED");
+    expect(result.poolKey).toEqual({
+      currency0: V4_CURRENCY0,
+      currency1: V4_CURRENCY1,
+      fee: V4_FEE,
+      tickSpacing: V4_TICK_SPACING,
+      hooks: V4_HOOKS,
+    });
+  });
+
   it("queries eth_getLogs with the exact canonical PoolManager address, Initialize topic0, PoolId topic1, and full deployment-to-pinned-block range", async () => {
     const { pool, classification } = classifiedV4Pool();
     const { rpc, calls } = buildFakeRpc({ getBlockNumber: async () => V4_BLOCK_NUMBER, getLogs: [v4InitializeLog()] });
@@ -196,6 +212,7 @@ describe("Uniswap V4 verification — CONTRADICTED", () => {
     expect(result.evidence[0]?.kind).toBe("V4_INITIALIZE_EVENT_FOUND");
     expect(result.evidence[0]?.support).toBe("CONTRADICTS");
     expect(result.historicalProvenance).toBeNull();
+    expect(result.poolKey).toBeNull();
   });
 
   it("resolves CONTRADICTED when the recomputed PoolId does not match the discovered PoolId", async () => {
@@ -214,6 +231,10 @@ describe("Uniswap V4 verification — CONTRADICTED", () => {
     // Provenance is still preserved even though the event contradicts —
     // it's real evidence about what WAS found, useful for the record.
     expect(result.historicalProvenance).not.toBeNull();
+    // The PoolKey is NOT exposed on a CONTRADICTED result, even though a
+    // PoolKey was structurally decoded along the way — only a genuinely
+    // VERIFIED result exposes it as trustworthy.
+    expect(result.poolKey).toBeNull();
   });
 
   it("resolves CONTRADICTED when the decoded currency pair does not match the discovered pool's tokens", async () => {
@@ -254,6 +275,7 @@ describe("Uniswap V4 verification — INDETERMINATE", () => {
     expect(result.evidence).toHaveLength(1);
     expect(result.evidence[0]?.kind).toBe("V4_INITIALIZE_EVENT_AMBIGUOUS");
     expect(result.historicalProvenance).toBeNull();
+    expect(result.poolKey).toBeNull();
   });
 
   it("resolves INDETERMINATE when the single matching log is removed", async () => {
@@ -289,6 +311,7 @@ describe("Uniswap V4 verification — RPC_ERROR", () => {
     expect(result.status).toBe("RPC_ERROR");
     expect(result.blockNumber).not.toBeNull();
     expect(result.historicalProvenance).toBeNull();
+    expect(result.poolKey).toBeNull();
   });
 });
 

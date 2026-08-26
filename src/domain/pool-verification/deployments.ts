@@ -18,7 +18,7 @@ import { UnknownProtocolDeploymentError } from "./errors";
  * identity-verification-private state.
  */
 export type ProtocolDeploymentProtocol = "UNISWAP_V3" | "UNISWAP_V4";
-export type ProtocolDeploymentRole = "factory" | "pool_manager" | "state_view";
+export type ProtocolDeploymentRole = "factory" | "pool_manager" | "state_view" | "quoter";
 
 export interface ProtocolDeployment {
   readonly chainId: number;
@@ -80,6 +80,22 @@ const DEPLOYMENTS: readonly ProtocolDeployment[] = [
     address: getAddress("0xf3334192d15450cdd385c8b70e03f9a6bd9e673b"),
     provenance:
       "Official Uniswap v4-periphery StateView deployment for Robinhood Chain (chainId 4663). Independently verified live: eth_getCode at this address is non-empty and its dispatch table contains the getSlot0/getLiquidity/poolManager selectors; calling this contract's own immutable `poolManager()` getter returns exactly the canonical PoolManager address configured above (0x8366a39CC670B4001A1121B8F6A443A643e40951) — StateView's PoolManager reference is set once in its constructor and can never change, so this binding is verified here, once, rather than re-checked on every state read.",
+  },
+  {
+    chainId: 4663,
+    protocol: "UNISWAP_V3",
+    role: "quoter",
+    address: getAddress("0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7"),
+    provenance:
+      "Official Uniswap v3-periphery QuoterV2 deployment for Robinhood Chain (chainId 4663). Independently verified live: eth_getCode at this address is non-empty; calling this contract's own immutable `factory()` getter returns exactly the canonical V3 factory address configured above (0x1f7d7550b1b028f7571e69a784071f0205fd2efa) — QuoterV2's factory reference is set once in its constructor (PeripheryImmutableState) and can never change, so this binding is verified here, once, rather than re-checked on every quote.",
+  },
+  {
+    chainId: 4663,
+    protocol: "UNISWAP_V4",
+    role: "quoter",
+    address: getAddress("0x8dc178efb8111bb0973dd9d722ebeff267c98f94"),
+    provenance:
+      "Official Uniswap v4-periphery V4Quoter deployment for Robinhood Chain (chainId 4663). Independently verified live: eth_getCode at this address is non-empty; calling this contract's own immutable `poolManager()` getter returns exactly the canonical PoolManager address configured above (0x8366a39CC670B4001A1121B8F6A443A643e40951) — V4Quoter's PoolManager reference is set once in its constructor (BaseV4Quoter) and can never change, so this binding is verified here, once, rather than re-checked on every quote.",
   },
 ];
 

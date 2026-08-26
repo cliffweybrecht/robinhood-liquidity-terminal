@@ -1,4 +1,4 @@
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 import type { ClassificationStatus, ClassifiedPoolIdentity, ProtocolFamily } from "@/domain/protocol";
 
 /**
@@ -101,6 +101,29 @@ export interface HistoricalPoolProvenance {
   readonly logIndex: number;
 }
 
+/**
+ * The immutable Uniswap V4 `PoolKey` fields already proven during
+ * identity verification (`strategies/uniswap-v4.ts`): recovered from
+ * the pool's historical `Initialize` event, and cryptographically
+ * confirmed (`keccak256(abi.encode(PoolKey))`) to reproduce the exact
+ * discovered `PoolId`. Exposed here as the SAME values already computed
+ * during verification — never re-derived, never re-read — so a later
+ * consumer (e.g. Phase 6E's V4 quote path) has trustworthy typed access
+ * to `currency0`/`currency1`/`fee`/`tickSpacing`/`hooks` without parsing
+ * the free-form `V4_POOL_KEY_RECOVERED` evidence string. Present only
+ * when `status === "VERIFIED"` and `family === "UNISWAP_V4"` — `null`/
+ * absent otherwise, including for a V4 result that reached `CONTRADICTED`
+ * (a contradicted identity's PoolKey is not "the verified PoolKey for
+ * this pool").
+ */
+export interface VerifiedV4PoolKey {
+  readonly currency0: Address;
+  readonly currency1: Address;
+  readonly fee: number;
+  readonly tickSpacing: number;
+  readonly hooks: Address;
+}
+
 export interface PoolIdentityVerification {
   readonly pool: ClassifiedPoolIdentity;
   readonly family: ProtocolFamily;
@@ -108,5 +131,7 @@ export interface PoolIdentityVerification {
   readonly status: PoolVerificationStatus;
   readonly blockNumber: bigint | null;
   readonly historicalProvenance?: HistoricalPoolProvenance | null;
+  /** Present only for a `VERIFIED` `UNISWAP_V4` result — see `VerifiedV4PoolKey`'s doc comment. */
+  readonly poolKey?: VerifiedV4PoolKey | null;
   readonly evidence: readonly PoolVerificationEvidence[];
 }
