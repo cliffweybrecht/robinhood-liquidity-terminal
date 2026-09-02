@@ -23,6 +23,20 @@ export interface TtlCache<T> {
    * value.
    */
   get(): Promise<TtlCacheEntry<T>>;
+  /**
+   * Discards the currently-cached entry (if any), without affecting an
+   * in-flight `produce()` call. The NEXT `get()` will treat the cache as
+   * missing and call `produce()` again. For a caller that already holds
+   * the just-produced value (e.g. from the `Promise` `get()` returned)
+   * and has determined AFTER THE FACT that this particular value must
+   * not be allowed to survive for the rest of `ttlMs`, calling
+   * `invalidate()` immediately — with no `await` in between — is the
+   * supported way to prevent any other caller from ever observing that
+   * value as cached: only synchronous code runs in between, so no other
+   * caller can start a new `get()` and observe the not-yet-invalidated
+   * entry before this call clears it.
+   */
+  invalidate(): void;
 }
 
 export function createTtlCache<T>(options: CreateTtlCacheOptions<T>): TtlCache<T> {
@@ -60,5 +74,9 @@ export function createTtlCache<T>(options: CreateTtlCacheOptions<T>): TtlCache<T
     return inFlight;
   }
 
-  return { get };
+  function invalidate(): void {
+    entry = null;
+  }
+
+  return { get, invalidate };
 }

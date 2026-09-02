@@ -143,4 +143,28 @@ describe("createTtlCache", () => {
     expect(() => createTtlCache({ ttlMs: 0, produce: async () => "x" })).toThrow();
     expect(() => createTtlCache({ ttlMs: -1, produce: async () => "x" })).toThrow();
   });
+
+  describe("invalidate", () => {
+    it("forces the next get() to re-produce even though the cached value is still within ttlMs", async () => {
+      const produce = vi.fn().mockResolvedValueOnce("v1").mockResolvedValueOnce("v2");
+      const cache = createTtlCache({ ttlMs: 1000, produce });
+
+      await cache.get();
+      cache.invalidate();
+      await vi.advanceTimersByTimeAsync(1);
+      const second = await cache.get();
+
+      expect(second.value).toBe("v2");
+      expect(produce).toHaveBeenCalledTimes(2);
+    });
+
+    it("is a no-op when nothing has ever been cached", async () => {
+      const produce = vi.fn().mockResolvedValue("v1");
+      const cache = createTtlCache({ ttlMs: 1000, produce });
+
+      expect(() => cache.invalidate()).not.toThrow();
+      await cache.get();
+      expect(produce).toHaveBeenCalledTimes(1);
+    });
+  });
 });

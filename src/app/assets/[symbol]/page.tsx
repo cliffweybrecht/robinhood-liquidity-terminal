@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { AssetNotFoundError, getRobinhoodAssetBySymbol } from "@/domain/asset";
 import { getAssetLiquidityProfileBySymbol, type AssetLiquidityProfile } from "@/domain/liquidity";
 import { getAssetPriceComparisonForAsset, type AssetPriceComparison } from "@/domain/price";
+import { ExecutionComparison } from "./ExecutionComparison";
 
 // Data must be fetched fresh on every request — see src/app/page.tsx.
 export const dynamic = "force-dynamic";
@@ -103,6 +104,8 @@ export default async function AssetPoolsPage({
           </p>
         </div>
       )}
+
+      <ExecutionComparison symbol={symbol} />
 
       {loadError ? (
         <div className="mt-6 rounded border border-red-800 bg-red-950/40 p-4 text-sm text-red-300">
