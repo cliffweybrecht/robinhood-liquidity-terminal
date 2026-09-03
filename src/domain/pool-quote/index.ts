@@ -5,7 +5,7 @@
 // are deliberately NOT exported here — same policy `pool-verification/
 // index.ts` and `pool-state/index.ts` use. No "quote at an arbitrary
 // block" primitive is exported: the only supported entry points are the
-// six functions below, each of which pins its own block internally.
+// seven functions below, each of which pins its own block internally.
 export { quoteVerifiedUniswapV3ExactInput, quoteVerifiedUniswapV3ExactInputWithAnalytics } from "./read-uniswap-v3-quote";
 export type { QuoteVerifiedUniswapV3ExactInputInput } from "./read-uniswap-v3-quote";
 export { quoteVerifiedUniswapV4ExactInput, quoteVerifiedUniswapV4ExactInputWithAnalytics } from "./read-uniswap-v4-quote";
@@ -14,8 +14,21 @@ export { quoteVerifiedUniswapV3ExactInputDepthCurve } from "./read-uniswap-v3-de
 export type { QuoteVerifiedUniswapV3ExactInputDepthCurveInput } from "./read-uniswap-v3-depth-curve";
 export { quoteVerifiedUniswapV4ExactInputDepthCurve } from "./read-uniswap-v4-depth-curve";
 export type { QuoteVerifiedUniswapV4ExactInputDepthCurveInput } from "./read-uniswap-v4-depth-curve";
-export { compareVerifiedPoolsExactInput } from "./compare-verified-pools";
+export { compareVerifiedPoolsExactInput, computeRanking } from "./compare-verified-pools";
 export type { ComparisonCandidateInput, CompareVerifiedPoolsExactInputInput } from "./compare-verified-pools";
+export {
+  classifyMatrixCandidates,
+  compareVerifiedPoolsAcrossExactInputs,
+  MATRIX_QUOTE_CONCURRENCY,
+  MATRIX_QUOTE_INTERVAL_MS,
+  MAX_MATRIX_AMOUNTS,
+  MAX_MATRIX_CELLS,
+} from "./compare-verified-pools-across-amounts";
+export type {
+  ClassifiedMatrixCandidates,
+  CompareVerifiedPoolsAcrossExactInputsInput,
+  PreconditionFailedRow,
+} from "./compare-verified-pools-across-amounts";
 export { largestQuotedSample, sampledDepthAtBps } from "./depth-math";
 export type {
   ComparisonCandidate,
@@ -25,7 +38,13 @@ export type {
   CrossPoolComparisonBlockPinFailure,
   CrossPoolComparisonResult,
   CrossPoolComparisonSnapshot,
+  CrossPoolExecutionMatrixBlockPinFailure,
+  CrossPoolExecutionMatrixResult,
+  CrossPoolExecutionMatrixSnapshot,
   DepthCurvePointLike,
+  MatrixCandidateRow,
+  MatrixCell,
+  MatrixRanking,
   QuoteAnalytics,
   QuoteAnalyticsStatus,
   QuoteEvidence,
@@ -54,6 +73,7 @@ export {
   IdentityNotVerifiedError,
   InvalidAmountInError,
   InvalidTokenInError,
+  MatrixTooLargeError,
   MismatchedComparisonGroupError,
   MissingHookDataError,
   MissingIdentityBlockError,
@@ -61,6 +81,7 @@ export {
   MissingVerifiedV3PoolKeyError,
   PoolIdentityMismatchError,
   QuotePreconditionError,
+  TooManyAmountsError,
   UnsupportedComparisonIdentityFamilyError,
   UnsupportedIdentityFamilyError,
 } from "./errors";

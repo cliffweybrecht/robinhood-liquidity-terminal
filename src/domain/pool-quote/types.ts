@@ -527,3 +527,119 @@ export interface CrossPoolComparisonSnapshot {
 
 /** Either a full comparison snapshot, or the comparison-wide block-pin failure representation — see `CrossPoolComparisonBlockPinFailure`'s doc comment for why the two are deliberately distinct shapes rather than one shape with more optional fields. */
 export type CrossPoolComparisonResult = CrossPoolComparisonSnapshot | CrossPoolComparisonBlockPinFailure;
+
+/**
+ * UI V1.1 — one (candidate, sampled trade size) result within a
+ * `CrossPoolExecutionMatrixSnapshot`. A deliberate fusion of
+ * `ComparisonCandidateBase`'s per-outcome vocabulary (status/
+ * analyticsStatus/executionPrice/priceImpactBps/evidence/
+ * preconditionFailure — reused verbatim, never redefined) and
+ * `DepthCurvePointBase`'s per-amount field (`amountIn`) — reusing BOTH
+ * existing status/failure vocabularies rather than inventing new ones.
+ * Independent of every sibling cell — one cell's status has no bearing
+ * on any other cell in the same row or the same column.
+ */
+export interface MatrixCell {
+  readonly amountIn: bigint;
+  readonly status: ComparisonCandidateStatus;
+  /** Present only when `status === "QUOTED"`. */
+  readonly amountOut?: bigint;
+  readonly analyticsStatus: QuoteAnalyticsStatus;
+  /** Present only when `status === "QUOTED"` AND this cell's own spot read succeeded AND the matrix's shared decimals resolution succeeded. */
+  readonly executionPrice?: RationalValue;
+  /** Present only under the same conditions as `executionPrice`. */
+  readonly priceImpactBps?: RationalValue;
+  /** Present only when `status === "QUOTED"`. Sourced from the SAME canonical quoter call's own return metadata (`UniswapV3/V4QuoteMetadata.gasEstimate`) — never a separate `eth_estimateGas` call. V3's extra `sqrtPriceX96After`/`initializedTicksCrossed` fields are intentionally not surfaced per cell, matching this project's existing DTO-boundary precedent (`dto.ts`'s `toCandidateDto`) of reducing quote metadata to `gasEstimate` only. */
+  readonly gasEstimate?: bigint;
+  readonly evidence: readonly QuoteEvidence[];
+  /** Present only when `status === "PRECONDITION_FAILED"`. */
+  readonly preconditionFailure?: ComparisonPreconditionFailure;
+}
+
+/**
+ * UI V1.1 — one candidate's full row across every sampled trade size.
+ * Row-level fields (pool identity, family, hookData disclosure) live
+ * ONCE here, exactly matching `ComparisonCandidate`'s own existing
+ * "shared candidate facts live once, per-amount facts live in the
+ * per-amount result" placement. `cells.length === ` the matrix's own
+ * `amountsIn.length` for EVERY row, including a `PRECONDITION_FAILED`
+ * row (hookData is row-level, not per-size — a missing-hookData row's
+ * cells all carry the identical precondition, one per requested amount,
+ * for column alignment).
+ */
+export interface MatrixCandidateRow {
+  readonly pool: ClassifiedPoolIdentity;
+  readonly family: "UNISWAP_V3" | "UNISWAP_V4";
+  readonly identityVerificationBlock: bigint;
+  /** `true` only when the caller explicitly supplied `hookData` for THIS hooked row. Absent for an unhooked row and for a row that is `PRECONDITION_FAILED` for missing hookData (there is nothing to disclose — none was supplied). */
+  readonly hookDataCallerSupplied?: boolean;
+  readonly cells: readonly MatrixCell[];
+}
+
+/**
+ * UI V1.1 — the authoritative ranking for ONE sampled trade size,
+ * reusing `compareVerifiedPoolsExactInput`'s own `computeRanking`
+ * algorithm verbatim (see `compare-verified-pools.ts`), applied
+ * independently per amount. Never mixed across amounts, never mixed
+ * across `tokenOut` groups.
+ */
+export interface MatrixRanking {
+  readonly amountIn: bigint;
+  readonly rankedQuotedPoolAddresses: readonly Hex[];
+  readonly bestCandidatePoolAddresses: readonly Hex[];
+}
+
+/**
+ * UI V1.1 — the comparison-wide block-pin failure representation for a
+ * matrix request. Structurally identical in spirit to
+ * `CrossPoolComparisonBlockPinFailure`, extended with `amountsIn`
+ * (plural) since a matrix always represents a whole ladder, even when
+ * the block itself could not be pinned.
+ */
+export interface CrossPoolExecutionMatrixBlockPinFailure {
+  readonly status: "BLOCK_PIN_FAILURE";
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly amountsIn: readonly bigint[];
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/**
+ * UI V1.1 — a same-block cross-pool x cross-size execution matrix:
+ * `rows.length` candidates (executable AND precondition-failed, in
+ * caller candidate order) x `amountsIn.length` sampled sizes (in caller
+ * order), ALL sharing the exact same pinned `blockNumber` and the exact
+ * same ONE shared decimals read — represents ONE chain state, exactly
+ * as `CrossPoolComparisonSnapshot` already does for the single-size
+ * case, extended by one dimension.
+ *
+ * `tokenInDecimals`/`tokenOutDecimals`/`sharedAnalyticsStatus`/
+ * `sharedEvidence` reflect the matrix's ONE shared decimals read,
+ * completely independent of any individual cell's own `analyticsStatus`
+ * — identical semantics to `CrossPoolComparisonSnapshot`'s own fields of
+ * the same name, now shared across the WHOLE matrix instead of one
+ * comparison.
+ *
+ * `rankingsByAmount` has exactly one entry per `amountsIn[j]`, computed
+ * independently per size over that size's own `QUOTED` cells only — see
+ * `MatrixRanking`'s own doc comment. Never interpolated between sizes;
+ * never a synthesized crossover amount anywhere in this type.
+ */
+export interface CrossPoolExecutionMatrixSnapshot {
+  readonly status: "OK";
+  readonly blockNumber: bigint;
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly amountsIn: readonly bigint[];
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  readonly sharedAnalyticsStatus: QuoteAnalyticsStatus;
+  readonly sharedEvidence: readonly QuoteEvidence[];
+  readonly rows: readonly MatrixCandidateRow[];
+  readonly rankingsByAmount: readonly MatrixRanking[];
+}
+
+/** Either a full execution matrix, or the matrix-wide block-pin failure representation. */
+export type CrossPoolExecutionMatrixResult = CrossPoolExecutionMatrixSnapshot | CrossPoolExecutionMatrixBlockPinFailure;

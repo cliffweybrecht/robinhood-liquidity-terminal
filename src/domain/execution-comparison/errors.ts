@@ -8,7 +8,8 @@ export type ExecutionComparisonErrorCode =
   | "NO_VERIFIED_GROUPS"
   | "UNKNOWN_OUTPUT_GROUP"
   | "MISSING_TOKEN_DECIMALS"
-  | "VERIFICATION_DEGRADED";
+  | "VERIFICATION_DEGRADED"
+  | "MATRIX_TOO_LARGE";
 
 export abstract class ExecutionComparisonError extends Error {
   abstract readonly code: ExecutionComparisonErrorCode;
@@ -76,5 +77,44 @@ export class MissingTokenDecimalsError extends ExecutionComparisonError {
     super(`Canonical asset "${symbol}" has no known tokenDecimals — cannot determine a default trade amount.`);
     this.name = "MissingTokenDecimalsError";
     this.symbol = symbol;
+  }
+}
+
+/**
+ * UI V1.1 — this orchestration layer's OWN fast-path rejection for an
+ * oversized matrix request, thrown in `compareMatrix.ts` immediately
+ * after snapshot resolution + candidate classification, BEFORE the
+ * pool-quote matrix primitive is even called. Deliberately a SEPARATE
+ * class from `@/domain/pool-quote`'s own `MatrixTooLargeError` — same
+ * module-independence policy this file's own header comment already
+ * establishes (never reused/extended across domain modules) — even
+ * though both represent the identical underlying condition
+ * (`executableCandidates x amountsIn > MAX_MATRIX_CELLS`, computed via
+ * the SAME imported `classifyMatrixCandidates`/`MAX_MATRIX_CELLS`, never
+ * a second independently-reasoned formula). This is the class the
+ * matrix API route expects and maps to 400; `pool-quote`'s own
+ * `MatrixTooLargeError` reaching the route at all would mean THIS
+ * layer's own pre-check has a bug (an internal invariant violation,
+ * mapped to 500 — mirroring how `QuotePreconditionError` is already
+ * handled by the existing single-comparison route for the identical
+ * "should never happen" reasoning).
+ */
+export class MatrixTooLargeError extends ExecutionComparisonError {
+  readonly code = "MATRIX_TOO_LARGE" as const;
+  readonly executableCandidates: number;
+  readonly amounts: number;
+  readonly cells: number;
+  readonly max: number;
+
+  constructor(executableCandidates: number, amounts: number, max: number) {
+    const cells = executableCandidates * amounts;
+    super(
+      `This matrix would require ${cells} cells (${executableCandidates} executable candidates x ${amounts} amounts), exceeding the maximum of ${max}`,
+    );
+    this.name = "MatrixTooLargeError";
+    this.executableCandidates = executableCandidates;
+    this.amounts = amounts;
+    this.cells = cells;
+    this.max = max;
   }
 }
