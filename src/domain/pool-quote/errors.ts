@@ -23,7 +23,9 @@ export type QuotePreconditionErrorCode =
   | "EMPTY_CANDIDATES"
   | "DUPLICATE_CANDIDATE"
   | "MISMATCHED_COMPARISON_GROUP"
-  | "UNSUPPORTED_COMPARISON_IDENTITY_FAMILY";
+  | "UNSUPPORTED_COMPARISON_IDENTITY_FAMILY"
+  | "TOO_MANY_AMOUNTS"
+  | "MATRIX_TOO_LARGE";
 
 export abstract class QuotePreconditionError extends Error {
   abstract readonly code: QuotePreconditionErrorCode;
@@ -231,5 +233,48 @@ export class UnsupportedComparisonIdentityFamilyError extends QuotePreconditionE
     super(`identity.family is "${family}" — compareVerifiedPoolsExactInput only supports UNISWAP_V3 and UNISWAP_V4 candidates`);
     this.name = "UnsupportedComparisonIdentityFamilyError";
     this.family = family;
+  }
+}
+
+/** UI V1.1: `amountsIn.length` exceeds `MAX_MATRIX_AMOUNTS` for `compareVerifiedPoolsAcrossExactInputs`. Thrown before any RPC call — a structural, unbypassable safety limit on the shared RPC endpoint, independent of and never overridable by any caller (see `compare-verified-pools-across-amounts.ts`'s own module doc comment for the full reasoning). */
+export class TooManyAmountsError extends QuotePreconditionError {
+  readonly code = "TOO_MANY_AMOUNTS" as const;
+  readonly requested: number;
+  readonly max: number;
+
+  constructor(requested: number, max: number) {
+    super(`amountsIn has ${requested} entries, exceeding the maximum of ${max} per matrix request`);
+    this.name = "TooManyAmountsError";
+    this.requested = requested;
+    this.max = max;
+  }
+}
+
+/**
+ * UI V1.1: `executableCandidates x amountsIn` would exceed
+ * `MAX_MATRIX_CELLS` — i.e. the number of ACTUAL canonical quoter RPC
+ * calls this matrix would attempt. Computed against the EXECUTABLE
+ * candidate count only (a hooked V4 candidate with no supplied
+ * `hookData` is `PRECONDITION_FAILED` and contributes zero to this
+ * count, per `classifyMatrixCandidates`) — never the raw candidate
+ * count. Thrown before any RPC call.
+ */
+export class MatrixTooLargeError extends QuotePreconditionError {
+  readonly code = "MATRIX_TOO_LARGE" as const;
+  readonly executableCandidates: number;
+  readonly amounts: number;
+  readonly cells: number;
+  readonly max: number;
+
+  constructor(executableCandidates: number, amounts: number, max: number) {
+    const cells = executableCandidates * amounts;
+    super(
+      `This matrix would require ${cells} cells (${executableCandidates} executable candidates x ${amounts} amounts), exceeding the maximum of ${max}`,
+    );
+    this.name = "MatrixTooLargeError";
+    this.executableCandidates = executableCandidates;
+    this.amounts = amounts;
+    this.cells = cells;
+    this.max = max;
   }
 }

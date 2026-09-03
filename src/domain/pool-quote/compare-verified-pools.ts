@@ -535,7 +535,14 @@ async function executeV4Candidate(
   };
 }
 
-function computeRanking(candidates: readonly ComparisonCandidate[]): { rankedQuotedPoolAddresses: readonly Hex[]; bestCandidatePoolAddresses: readonly Hex[] } {
+/**
+ * Exported for reuse by `compare-verified-pools-across-amounts.ts`
+ * (UI V1.1's matrix primitive) — the IDENTICAL per-amount ranking
+ * algorithm applied once per sampled trade size instead of once per
+ * comparison. Zero behavioral change to this function or to
+ * `compareVerifiedPoolsExactInput`'s own existing use of it.
+ */
+export function computeRanking(candidates: readonly ComparisonCandidate[]): { rankedQuotedPoolAddresses: readonly Hex[]; bestCandidatePoolAddresses: readonly Hex[] } {
   const quoted = candidates.filter(
     (c): c is ComparisonCandidate & { readonly status: "QUOTED"; readonly amountOut: bigint } => c.status === "QUOTED" && c.amountOut !== undefined,
   );

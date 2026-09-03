@@ -4,6 +4,8 @@ export { buildGroups, buildVerifiedExecutionSnapshot, deriveVerifiedTokenOut, ge
 export type { SnapshotBuildDeps } from "./snapshot";
 export { compareAssetExecutionBySymbol, compareAssetExecutionFromSnapshot, getAssetExecutionGroupsBySymbol, groupsFromSnapshot } from "./compare";
 export type { AssetExecutionComparison, AssetExecutionGroups, CompareAssetExecutionBySymbolInput } from "./compare";
+export { compareAssetExecutionMatrixFromSnapshot, DEFAULT_MATRIX_LADDER_MULTIPLIERS } from "./compareMatrix";
+export type { AssetExecutionMatrix, CompareAssetExecutionMatrixInput } from "./compareMatrix";
 export { toAssetExecutionComparisonDto } from "./dto";
 export type {
   AssetExecutionComparisonDto,
@@ -15,8 +17,20 @@ export type {
   PreconditionFailureDto,
   RationalDto,
 } from "./dto";
+export { toAssetExecutionMatrixDto } from "./matrixDto";
+export type {
+  AssetExecutionMatrixDto,
+  ExecutionMatrixGroupDto,
+  MatrixCellDto,
+  MatrixRankingDto,
+  MatrixResultBlockPinFailureDto,
+  MatrixResultDto,
+  MatrixResultSnapshotDto,
+  MatrixRowDto,
+} from "./matrixDto";
 export {
   ExecutionComparisonError,
+  MatrixTooLargeError,
   MissingTokenDecimalsError,
   NoVerifiedGroupsError,
   UnknownOutputGroupError,
@@ -31,3 +45,11 @@ export type {
   ParsedCompareRequestShape,
   ResolveAmountInResult,
 } from "./request";
+export { parseCompareMatrixRequestShape, resolveAmountsIn } from "./requestMatrix";
+export type {
+  CompareMatrixRequestValidationError,
+  CompareMatrixRequestValidationErrorCode,
+  ParseCompareMatrixRequestShapeResult,
+  ParsedCompareMatrixRequestShape,
+  ResolveAmountsInResult,
+} from "./requestMatrix";
