@@ -25,7 +25,9 @@ export type QuotePreconditionErrorCode =
   | "MISMATCHED_COMPARISON_GROUP"
   | "UNSUPPORTED_COMPARISON_IDENTITY_FAMILY"
   | "TOO_MANY_AMOUNTS"
-  | "MATRIX_TOO_LARGE";
+  | "MATRIX_TOO_LARGE"
+  | "EMPTY_THRESHOLDS"
+  | "DEPTH_THRESHOLDS_TOO_LARGE";
 
 export abstract class QuotePreconditionError extends Error {
   abstract readonly code: QuotePreconditionErrorCode;
@@ -274,6 +276,54 @@ export class MatrixTooLargeError extends QuotePreconditionError {
     this.name = "MatrixTooLargeError";
     this.executableCandidates = executableCandidates;
     this.amounts = amounts;
+    this.cells = cells;
+    this.max = max;
+  }
+}
+
+/** Executable-Depth Thresholds: `thresholdsBps` (the caller-supplied threshold list) has zero entries. Mirrors `EmptyAmountsLadderError`'s exact shape/reasoning — a threshold derivation with nothing to derive against is not a meaningful request. Thrown before any RPC call. */
+export class EmptyThresholdsError extends QuotePreconditionError {
+  readonly code = "EMPTY_THRESHOLDS" as const;
+
+  constructor() {
+    super("thresholdsBps must contain at least one entry — a depth-threshold request with zero requested thresholds is not a meaningful request");
+    this.name = "EmptyThresholdsError";
+  }
+}
+
+/**
+ * Executable-Depth Thresholds: `executableCandidates x amountsIn`
+ * (the ladder length, frozen at 12) would exceed
+ * `MAX_DEPTH_THRESHOLD_CELLS` — i.e. the number of ACTUAL canonical
+ * quoter RPC calls this depth-threshold request would attempt.
+ * Computed against the EXECUTABLE candidate count only (a hooked V4
+ * candidate with no supplied `hookData` is `PRECONDITION_FAILED` and
+ * contributes zero to this count, per `classifyMatrixCandidates`) —
+ * never the raw candidate count. Thrown before any RPC call.
+ *
+ * Deliberately a SEPARATE class from this same module's own
+ * `MatrixTooLargeError` (and from `execution-comparison`'s own
+ * identically-named `DepthThresholdsTooLargeError`) even though all
+ * three represent conceptually similar "too many RPC cells" conditions
+ * — matching this codebase's established module/primitive-independence
+ * policy (see the Executable-Depth Thresholds frozen implementation
+ * plan, Revision 2, "peer canonical orchestration primitives").
+ */
+export class DepthThresholdsTooLargeError extends QuotePreconditionError {
+  readonly code = "DEPTH_THRESHOLDS_TOO_LARGE" as const;
+  readonly executableCandidates: number;
+  readonly ladderLength: number;
+  readonly cells: number;
+  readonly max: number;
+
+  constructor(executableCandidates: number, ladderLength: number, max: number) {
+    const cells = executableCandidates * ladderLength;
+    super(
+      `This depth-threshold request would require ${cells} cells (${executableCandidates} executable candidates x ${ladderLength} ladder samples), exceeding the maximum of ${max}`,
+    );
+    this.name = "DepthThresholdsTooLargeError";
+    this.executableCandidates = executableCandidates;
+    this.ladderLength = ladderLength;
     this.cells = cells;
     this.max = max;
   }

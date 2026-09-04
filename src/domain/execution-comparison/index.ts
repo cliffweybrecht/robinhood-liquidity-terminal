@@ -6,6 +6,8 @@ export { compareAssetExecutionBySymbol, compareAssetExecutionFromSnapshot, getAs
 export type { AssetExecutionComparison, AssetExecutionGroups, CompareAssetExecutionBySymbolInput } from "./compare";
 export { compareAssetExecutionMatrixFromSnapshot, DEFAULT_MATRIX_LADDER_MULTIPLIERS } from "./compareMatrix";
 export type { AssetExecutionMatrix, CompareAssetExecutionMatrixInput } from "./compareMatrix";
+export { compareAssetExecutionDepthThresholdsFromSnapshot, DEPTH_THRESHOLD_BPS, DEPTH_THRESHOLD_LADDER_MULTIPLIERS } from "./compareDepthThresholds";
+export type { AssetExecutionDepthThresholds, CompareAssetExecutionDepthThresholdsInput } from "./compareDepthThresholds";
 export { toAssetExecutionComparisonDto } from "./dto";
 export type {
   AssetExecutionComparisonDto,
@@ -28,7 +30,20 @@ export type {
   MatrixResultSnapshotDto,
   MatrixRowDto,
 } from "./matrixDto";
+export { toAssetExecutableDepthDto } from "./depthThresholdsDto";
+export type {
+  AssetExecutableDepthDto,
+  BestVenueAtThresholdDto,
+  DepthThresholdCellDto,
+  DepthThresholdOutcomeDto,
+  DepthThresholdPoolResultDto,
+  DepthThresholdsResultBlockPinFailureDto,
+  DepthThresholdsResultDto,
+  DepthThresholdsResultSnapshotDto,
+  UpperRangeDto,
+} from "./depthThresholdsDto";
 export {
+  DepthThresholdsTooLargeError,
   ExecutionComparisonError,
   MatrixTooLargeError,
   MissingTokenDecimalsError,
@@ -53,3 +68,10 @@ export type {
   ParsedCompareMatrixRequestShape,
   ResolveAmountsInResult,
 } from "./requestMatrix";
+export { parseDepthThresholdsRequestShape } from "./requestDepthThresholds";
+export type {
+  DepthThresholdsRequestValidationError,
+  DepthThresholdsRequestValidationErrorCode,
+  ParseDepthThresholdsRequestShapeResult,
+  ParsedDepthThresholdsRequestShape,
+} from "./requestDepthThresholds";

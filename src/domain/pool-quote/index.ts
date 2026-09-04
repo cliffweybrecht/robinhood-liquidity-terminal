@@ -5,7 +5,7 @@
 // are deliberately NOT exported here — same policy `pool-verification/
 // index.ts` and `pool-state/index.ts` use. No "quote at an arbitrary
 // block" primitive is exported: the only supported entry points are the
-// seven functions below, each of which pins its own block internally.
+// eight functions below, each of which pins its own block internally.
 export { quoteVerifiedUniswapV3ExactInput, quoteVerifiedUniswapV3ExactInputWithAnalytics } from "./read-uniswap-v3-quote";
 export type { QuoteVerifiedUniswapV3ExactInputInput } from "./read-uniswap-v3-quote";
 export { quoteVerifiedUniswapV4ExactInput, quoteVerifiedUniswapV4ExactInputWithAnalytics } from "./read-uniswap-v4-quote";
@@ -29,7 +29,14 @@ export type {
   CompareVerifiedPoolsAcrossExactInputsInput,
   PreconditionFailedRow,
 } from "./compare-verified-pools-across-amounts";
-export { largestQuotedSample, sampledDepthAtBps } from "./depth-math";
+export { classifyUpperRange, largestQuotedSample, monotonicityObservedAtOrBelow, sampledDepthAtBps } from "./depth-math";
+export {
+  computeVerifiedPoolDepthThresholds,
+  DEPTH_THRESHOLD_QUOTE_CONCURRENCY,
+  DEPTH_THRESHOLD_QUOTE_INTERVAL_MS,
+  MAX_DEPTH_THRESHOLD_CELLS,
+} from "./compute-verified-pool-depth-thresholds";
+export type { ComputeVerifiedPoolDepthThresholdsInput } from "./compute-verified-pool-depth-thresholds";
 export type {
   ComparisonCandidate,
   ComparisonCandidateStatus,
@@ -42,6 +49,7 @@ export type {
   CrossPoolExecutionMatrixResult,
   CrossPoolExecutionMatrixSnapshot,
   DepthCurvePointLike,
+  DepthThresholdOutcome,
   MatrixCandidateRow,
   MatrixCell,
   MatrixRanking,
@@ -65,11 +73,19 @@ export type {
   UniswapV4QuoteMetadata,
   UniswapV4QuoteVerification,
   UniswapV4QuoteWithAnalytics,
+  UpperRangeClassification,
+  BestVenueAtThreshold,
+  VerifiedPoolDepthResult,
+  VerifiedPoolDepthThresholdsBlockPinFailure,
+  VerifiedPoolDepthThresholdsResult,
+  VerifiedPoolDepthThresholdsSnapshot,
 } from "./types";
 export {
+  DepthThresholdsTooLargeError,
   DuplicateCandidateError,
   EmptyAmountsLadderError,
   EmptyCandidatesError,
+  EmptyThresholdsError,
   IdentityNotVerifiedError,
   InvalidAmountInError,
   InvalidTokenInError,

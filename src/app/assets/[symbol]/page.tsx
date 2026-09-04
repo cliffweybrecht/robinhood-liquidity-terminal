@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { AssetNotFoundError, getRobinhoodAssetBySymbol } from "@/domain/asset";
 import { getAssetLiquidityProfileBySymbol, type AssetLiquidityProfile } from "@/domain/liquidity";
 import { getAssetPriceComparisonForAsset, type AssetPriceComparison } from "@/domain/price";
+import { ExecutableDepth } from "./ExecutableDepth";
 import { ExecutionComparison } from "./ExecutionComparison";
 import { ExecutionMatrix } from "./ExecutionMatrix";
 
@@ -109,6 +110,8 @@ export default async function AssetPoolsPage({
       <ExecutionComparison symbol={symbol} />
 
       <ExecutionMatrix symbol={symbol} />
+
+      <ExecutableDepth symbol={symbol} />
 
       {loadError ? (
         <div className="mt-6 rounded border border-red-800 bg-red-950/40 p-4 text-sm text-red-300">

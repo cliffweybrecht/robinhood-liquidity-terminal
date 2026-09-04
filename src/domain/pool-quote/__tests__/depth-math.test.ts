@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { largestQuotedSample, mapWithBoundedConcurrency, sampledDepthAtBps } from "../depth-math";
+import { classifyUpperRange, largestQuotedSample, mapWithBoundedConcurrency, monotonicityObservedAtOrBelow, sampledDepthAtBps } from "../depth-math";
 import type { DepthCurvePointLike } from "../types";
 
 function point(amountIn: bigint, status: DepthCurvePointLike["status"], priceImpactBps?: { numerator: bigint; denominator: bigint }): DepthCurvePointLike {
@@ -89,6 +89,110 @@ describe("sampledDepthAtBps", () => {
       point(2n, "QUOTED", { numerator: 5n, denominator: 1n }), // +5 bps
     ];
     expect(sampledDepthAtBps(points, -5)).toBe(1n);
+  });
+});
+
+describe("monotonicityObservedAtOrBelow", () => {
+  it("returns true for an empty array", () => {
+    expect(monotonicityObservedAtOrBelow([], 100, 50n)).toBe(true);
+  });
+
+  it("returns true when every QUOTED point at or below amountIn qualifies", () => {
+    const points = [point(1n, "QUOTED", { numerator: 10n, denominator: 1n }), point(10n, "QUOTED", { numerator: 90n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 10n)).toBe(true);
+  });
+
+  it("returns false when a smaller tested point exceeds the threshold while amountIn itself qualifies", () => {
+    const points = [point(1n, "QUOTED", { numerator: 150n, denominator: 1n }), point(10n, "QUOTED", { numerator: 90n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 10n)).toBe(false);
+  });
+
+  it("ignores points above amountIn entirely", () => {
+    const points = [point(1n, "QUOTED", { numerator: 10n, denominator: 1n }), point(1000n, "QUOTED", { numerator: 99999n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 1n)).toBe(true);
+  });
+
+  it("skips non-QUOTED points at or below amountIn — a gap is never a monotonicity violation", () => {
+    const points = [point(1n, "RPC_ERROR"), point(10n, "QUOTED", { numerator: 90n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 10n)).toBe(true);
+  });
+
+  it("does not assume sorted input", () => {
+    const points = [point(10n, "QUOTED", { numerator: 90n, denominator: 1n }), point(1n, "QUOTED", { numerator: 150n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 10n)).toBe(false);
+  });
+
+  it("exact rational comparison — a point exactly at the threshold does not violate", () => {
+    const points = [point(1n, "QUOTED", { numerator: 100n, denominator: 1n }), point(10n, "QUOTED", { numerator: 100n, denominator: 1n })];
+    expect(monotonicityObservedAtOrBelow(points, 100, 10n)).toBe(true);
+  });
+});
+
+describe("classifyUpperRange", () => {
+  it("OPEN — no point has a larger amountIn than the given value", () => {
+    const points = [point(1n, "QUOTED"), point(10n, "QUOTED")];
+    expect(classifyUpperRange(points, 10n)).toEqual({ kind: "OPEN" });
+  });
+
+  it("OPEN — empty points array", () => {
+    expect(classifyUpperRange([], 10n)).toEqual({ kind: "OPEN" });
+  });
+
+  it("CLEAN_CEILING — every larger point is QUOTED AND has a measured impact, returns the smallest one", () => {
+    const impact = { numerator: 10n, denominator: 1n };
+    const points = [point(1n, "QUOTED", impact), point(500n, "QUOTED", impact), point(250n, "QUOTED", impact)];
+    expect(classifyUpperRange(points, 1n)).toEqual({ kind: "CLEAN_CEILING", nextMeasuredAmountIn: 250n });
+  });
+
+  it("GAPPED_CEILING — the exact 100/250/500 scenario from the frozen correction: 250 RPC_ERROR, 500 QUOTED with measured impact", () => {
+    const impact = { numerator: 10n, denominator: 1n };
+    const points = [point(100n, "QUOTED", impact), point(250n, "RPC_ERROR"), point(500n, "QUOTED", impact)];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_CEILING", nextMeasuredAmountIn: 500n });
+  });
+
+  it("GAPPED_NO_CEILING — every larger point is non-QUOTED", () => {
+    const points = [point(100n, "QUOTED"), point(250n, "RPC_ERROR"), point(500n, "RPC_ERROR")];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_NO_CEILING" });
+  });
+
+  it("GAPPED_NO_CEILING treats INDETERMINATE, UNQUOTABLE, and PRECONDITION_FAILED uniformly as non-QUOTED", () => {
+    const points = [point(100n, "QUOTED"), point(200n, "INDETERMINATE"), point(300n, "UNQUOTABLE"), point(400n, "PRECONDITION_FAILED")];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_NO_CEILING" });
+  });
+
+  it("does not assume sorted input", () => {
+    const impact = { numerator: 10n, denominator: 1n };
+    const points = [point(500n, "QUOTED", impact), point(100n, "QUOTED", impact), point(250n, "RPC_ERROR")];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_CEILING", nextMeasuredAmountIn: 500n });
+  });
+
+  it("ignores points at or below the given value entirely — a gap below amountIn never affects the upper-range classification", () => {
+    const impact = { numerator: 10n, denominator: 1n };
+    const points = [point(1n, "RPC_ERROR"), point(100n, "QUOTED", impact), point(250n, "QUOTED", impact)];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "CLEAN_CEILING", nextMeasuredAmountIn: 250n });
+  });
+
+  it("a point exactly equal to amountIn is excluded (strictly greater only)", () => {
+    const points = [point(100n, "QUOTED"), point(100n, "RPC_ERROR")];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "OPEN" });
+  });
+
+  it("QUOTED-but-impact-unavailable does NOT count as measured — a status===QUOTED point with priceImpactBps undefined is treated as a gap, never as a confirmed 'exceeded' ceiling", () => {
+    // 100 qualifying; 250 QUOTED but priceImpactBps undefined (analytics unavailable for that point); 500 QUOTED with real impact.
+    const points = [point(100n, "QUOTED", { numerator: 70n, denominator: 1n }), { amountIn: 250n, status: "QUOTED" as const, evidence: [] }, point(500n, "QUOTED", { numerator: 140n, denominator: 1n })];
+    // Must NOT become CLEAN_CEILING (which would wrongly claim 250 was evaluated) —
+    // must disclose the unresolved 250 point via GAPPED_CEILING, with 500 (the
+    // smallest point that actually HAS a measured impact) as the ceiling.
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_CEILING", nextMeasuredAmountIn: 500n });
+  });
+
+  it("GAPPED_NO_CEILING when every larger point is QUOTED but none has a measured impact", () => {
+    const points = [
+      point(100n, "QUOTED", { numerator: 70n, denominator: 1n }),
+      { amountIn: 250n, status: "QUOTED" as const, evidence: [] },
+      { amountIn: 500n, status: "QUOTED" as const, evidence: [] },
+    ];
+    expect(classifyUpperRange(points, 100n)).toEqual({ kind: "GAPPED_NO_CEILING" });
   });
 });
 

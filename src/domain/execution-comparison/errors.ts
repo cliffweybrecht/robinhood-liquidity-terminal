@@ -9,7 +9,8 @@ export type ExecutionComparisonErrorCode =
   | "UNKNOWN_OUTPUT_GROUP"
   | "MISSING_TOKEN_DECIMALS"
   | "VERIFICATION_DEGRADED"
-  | "MATRIX_TOO_LARGE";
+  | "MATRIX_TOO_LARGE"
+  | "DEPTH_THRESHOLDS_TOO_LARGE";
 
 export abstract class ExecutionComparisonError extends Error {
   abstract readonly code: ExecutionComparisonErrorCode;
@@ -114,6 +115,45 @@ export class MatrixTooLargeError extends ExecutionComparisonError {
     this.name = "MatrixTooLargeError";
     this.executableCandidates = executableCandidates;
     this.amounts = amounts;
+    this.cells = cells;
+    this.max = max;
+  }
+}
+
+/**
+ * Executable-Depth Thresholds — this orchestration layer's OWN
+ * fast-path rejection for an oversized depth-threshold request, thrown
+ * in `compareDepthThresholds.ts` immediately after snapshot resolution
+ * + candidate classification, BEFORE the pool-quote depth-threshold
+ * primitive is even called. Deliberately a SEPARATE class from
+ * `@/domain/pool-quote`'s own `DepthThresholdsTooLargeError` — same
+ * module-independence policy this file's own header comment already
+ * establishes, and the SAME dual-class pattern this file's own
+ * `MatrixTooLargeError` already uses relative to pool-quote's own
+ * identically-named class — even though both represent the identical
+ * underlying condition (`executableCandidates x 12 >
+ * MAX_DEPTH_THRESHOLD_CELLS`, computed via the SAME imported
+ * `classifyMatrixCandidates`, never a second independently-reasoned
+ * formula). This is the class the depth-thresholds API route expects
+ * and maps to 400; pool-quote's own `DepthThresholdsTooLargeError`
+ * reaching the route at all would mean THIS layer's own pre-check has a
+ * bug (an internal invariant violation, mapped to 500).
+ */
+export class DepthThresholdsTooLargeError extends ExecutionComparisonError {
+  readonly code = "DEPTH_THRESHOLDS_TOO_LARGE" as const;
+  readonly executableCandidates: number;
+  readonly ladderLength: number;
+  readonly cells: number;
+  readonly max: number;
+
+  constructor(executableCandidates: number, ladderLength: number, max: number) {
+    const cells = executableCandidates * ladderLength;
+    super(
+      `This depth-threshold request would require ${cells} cells (${executableCandidates} executable candidates x ${ladderLength} ladder samples), exceeding the maximum of ${max}`,
+    );
+    this.name = "DepthThresholdsTooLargeError";
+    this.executableCandidates = executableCandidates;
+    this.ladderLength = ladderLength;
     this.cells = cells;
     this.max = max;
   }

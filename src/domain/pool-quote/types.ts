@@ -259,13 +259,69 @@ export interface UniswapV4DepthCurvePoint extends DepthCurvePointBase {
  * Minimal structural shape both `UniswapV3DepthCurvePoint` and
  * `UniswapV4DepthCurvePoint` already satisfy — lets the pure
  * threshold-derivation helpers (`largestQuotedSample`/
- * `sampledDepthAtBps`, see `depth-math.ts`) accept either protocol's
+ * `sampledDepthAtBps`/`monotonicityObservedAtOrBelow`/
+ * `classifyUpperRange`, see `depth-math.ts`) accept either protocol's
  * point array without a generic dispatcher or duplicated per-protocol
  * helper functions.
+ *
+ * `status` is `ComparisonCandidateStatus` (not the narrower
+ * `QuoteStatus`) specifically so a `MatrixCell` — which can be
+ * `"PRECONDITION_FAILED"` (e.g. a V4 exact-input amount exceeding
+ * `UINT128_MAX` at one ladder point) — also structurally satisfies
+ * this shape; every one of the four `depth-math.ts` helpers above
+ * already treats any non-`"QUOTED"` status identically (skipped, never
+ * distinguished), so this widening is purely additive and changes no
+ * existing behavior for `UniswapV3DepthCurvePoint`/
+ * `UniswapV4DepthCurvePoint` values, which never produce
+ * `"PRECONDITION_FAILED"` in the first place.
+ *
+ * Compatibility audit performed for the Executable-Depth Thresholds
+ * adversarial pre-commit pass (Issue 2), re-verified against source
+ * directly rather than trusting the test suite alone:
+ *  1. Pre-existing production consumers: `largestQuotedSample` and
+ *     `sampledDepthAtBps` (both unmodified — this change touches only
+ *     the shared PARAMETER TYPE they and the two newer helpers accept,
+ *     never their implementations).
+ *  2. Pre-existing tests/fixtures depending on the narrower contract:
+ *     NONE. `read-uniswap-v3-depth-curve.test.ts`/`read-uniswap-v4-
+ *     depth-curve.test.ts` DO call `largestQuotedSample`/
+ *     `sampledDepthAtBps` directly against real `curve.points`
+ *     (`UniswapV3DepthCurvePoint[]`/`UniswapV4DepthCurvePoint[]`,
+ *     `status: QuoteStatus`) — since `QuoteStatus` is a proper subset
+ *     of `ComparisonCandidateStatus`, every such value remains
+ *     trivially assignable to the widened shape; these tests continue
+ *     to pass unmodified.
+ *  3. Does this change the semantic CONTRACT of existing 6F.1 helpers?
+ *     NO. `UniswapV3DepthCurvePoint`/`UniswapV4DepthCurvePoint`
+ *     themselves (via `DepthCurvePointBase`) still declare
+ *     `status: QuoteStatus` — narrower, unchanged, untouched by this
+ *     edit. Only the STANDALONE structural-acceptance type used as a
+ *     parameter contract was widened; no 6F.1 reader's own return type
+ *     changed shape at all.
+ *  4/5/6. Is the widening required, and is there a smaller alternative?
+ *     YES it is required, and NO smaller alternative was found:
+ *     `sampledDepthAtBps` is reused VERBATIM (never duplicated, per
+ *     this project's own "do not duplicate threshold math" discipline)
+ *     by the NEW Executable-Depth primitive against `MatrixCell[]`
+ *     values — so `sampledDepthAtBps` itself, not merely the two newer
+ *     helpers, must accept the wider status. A parallel, narrower
+ *     structural type would force either (a) duplicating
+ *     `sampledDepthAtBps`/`largestQuotedSample` for the wider shape —
+ *     rejected, directly duplicates threshold math — or (b) a generic
+ *     type parameter threaded through four function signatures for a
+ *     benefit that is purely cosmetic, since `QuoteStatus`'s clean
+ *     subset relationship to `ComparisonCandidateStatus` already makes
+ *     the simple widening fully backward compatible. This type's own
+ *     ORIGINAL purpose (stated above: let unrelated point shapes share
+ *     one derivation-function contract without a dispatcher or
+ *     duplicated helpers) already anticipated exactly this kind of
+ *     extension — `MatrixCell` is simply a third point-like shape
+ *     joining the two `UniswapV3/V4DepthCurvePoint` types this
+ *     interface already existed to unify. Kept, not reverted.
  */
 export interface DepthCurvePointLike {
   readonly amountIn: bigint;
-  readonly status: QuoteStatus;
+  readonly status: ComparisonCandidateStatus;
   readonly priceImpactBps?: RationalValue;
 }
 
@@ -643,3 +699,136 @@ export interface CrossPoolExecutionMatrixSnapshot {
 
 /** Either a full execution matrix, or the matrix-wide block-pin failure representation. */
 export type CrossPoolExecutionMatrixResult = CrossPoolExecutionMatrixSnapshot | CrossPoolExecutionMatrixBlockPinFailure;
+
+/**
+ * Executable-Depth Thresholds — the ONE structural classification of
+ * what is and is not known about ladder points STRICTLY LARGER than a
+ * given qualifying threshold value. See `depth-math.ts`'s
+ * `classifyUpperRange` (the sole function that produces this type) for
+ * the full reasoning behind each variant — this type exists
+ * specifically so a caller/UI can never conflate "the next REQUESTED
+ * larger sample" with "the next SUCCESSFULLY MEASURED larger sample."
+ */
+export type UpperRangeClassification =
+  | { readonly kind: "OPEN" }
+  | { readonly kind: "CLEAN_CEILING"; readonly nextMeasuredAmountIn: bigint }
+  | { readonly kind: "GAPPED_CEILING"; readonly nextMeasuredAmountIn: bigint }
+  | { readonly kind: "GAPPED_NO_CEILING" };
+
+/**
+ * Executable-Depth Thresholds — one (pool, threshold) result. Computed
+ * ONLY for an executable pool (a `PRECONDITION_FAILED` row, see
+ * `VerifiedPoolDepthResult`, never reaches this — its precondition is a
+ * WHOLE-ROW fact, not a per-threshold one, so it has zero outcomes).
+ *
+ *  - `NO_QUOTED_SAMPLES`: every point in this pool's ladder is
+ *    non-`QUOTED` — nothing at all could be established. A ladder-level
+ *    fact, true identically for every threshold.
+ *  - `ANALYTICS_UNAVAILABLE`: the request's ONE shared spot/decimals
+ *    read failed (no `QUOTED` point anywhere in this request has a
+ *    defined `priceImpactBps`) — a REQUEST-level fact, true identically
+ *    for every pool and every threshold in this same request. A point's
+ *    own `amountOut`/`status` is never altered by this — only the
+ *    derived impact comparison is unavailable.
+ *  - `EXCEEDED_AT_SMALLEST_SAMPLE`: at least one point was genuinely
+ *    measured (has a defined `priceImpactBps`), but none satisfies this
+ *    threshold. `smallestMeasuredAmountIn` is the smallest `amountIn`
+ *    among points with a defined `priceImpactBps` — NOT necessarily the
+ *    ladder's literal smallest requested entry, if that specific point
+ *    itself failed to quote or its analytics were unavailable; this is
+ *    the smallest amount we actually have measured evidence about.
+ *  - `WITHIN_THRESHOLD`: `qualifyingAmountIn` is `sampledDepthAtBps`'s
+ *    own return value for this threshold — "at least this much was
+ *    tested and observed to qualify," never a stronger claim.
+ *    `monotonicityObserved` (`monotonicityObservedAtOrBelow`) and
+ *    `upperRange` (`classifyUpperRange`) are two independent,
+ *    non-overlapping disclosures: the former concerns points AT OR
+ *    BELOW `qualifyingAmountIn`, the latter concerns points STRICTLY
+ *    ABOVE it. Neither implies anything about the other.
+ */
+export type DepthThresholdOutcome =
+  | {
+      readonly kind: "WITHIN_THRESHOLD";
+      readonly qualifyingAmountIn: bigint;
+      readonly monotonicityObserved: boolean;
+      readonly upperRange: UpperRangeClassification;
+    }
+  | { readonly kind: "EXCEEDED_AT_SMALLEST_SAMPLE"; readonly smallestMeasuredAmountIn: bigint }
+  | { readonly kind: "ANALYTICS_UNAVAILABLE" }
+  | { readonly kind: "NO_QUOTED_SAMPLES" };
+
+/**
+ * Executable-Depth Thresholds — one executable pool's complete result:
+ * its full 12-point ladder (`row.cells`, reusing `MatrixCandidateRow`
+ * verbatim — the identical "one pool across every sampled size" shape
+ * the matrix already uses) plus one `DepthThresholdOutcome` per
+ * requested threshold, in threshold order. A `PRECONDITION_FAILED` row
+ * (hooked V4, missing hookData — case G) still has a full `row.cells`
+ * array (every cell `PRECONDITION_FAILED`, mirroring the matrix's own
+ * precondition-failed-row shape exactly) but an EMPTY
+ * `outcomesByThreshold` — a row-wide precondition is a WHOLE-ROW fact,
+ * never expressed as four repeated per-threshold outcomes.
+ */
+export interface VerifiedPoolDepthResult {
+  readonly row: MatrixCandidateRow;
+  readonly outcomesByThreshold: readonly { readonly thresholdBps: number; readonly outcome: DepthThresholdOutcome }[];
+}
+
+/**
+ * Executable-Depth Thresholds — the best sampled venue(s) at ONE
+ * threshold: every executable pool whose `qualifyingAmountIn` at this
+ * threshold equals the maximum observed across all executable pools in
+ * this request, compared by exact `bigint` equality. `poolAddresses`
+ * is empty when zero pools qualify at this threshold (an honest "no
+ * tested venue qualifies" result, never omitted). Ties are ALWAYS
+ * preserved — no gas, displayed liquidity, TVL, protocol preference, or
+ * address ordering is ever used to break a tie; a deterministic address
+ * order may be applied only for PRESENTATION after every tied address
+ * has already been included.
+ */
+export interface BestVenueAtThreshold {
+  readonly thresholdBps: number;
+  readonly poolAddresses: readonly Hex[];
+}
+
+/** Executable-Depth Thresholds — the request-wide block-pin failure representation. Structurally identical in spirit to `CrossPoolExecutionMatrixBlockPinFailure`, with no `amountsIn`/`thresholdsBps` echoed back (nothing was attempted at all). */
+export interface VerifiedPoolDepthThresholdsBlockPinFailure {
+  readonly status: "BLOCK_PIN_FAILURE";
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly evidence: readonly QuoteEvidence[];
+}
+
+/**
+ * Executable-Depth Thresholds — a same-block, per-pool sampled
+ * execution-depth result across every executable pool in one verified
+ * `tokenOut` group, evaluated against a caller-supplied set of
+ * thresholds. Represents ONE chain state: `blockNumber` is pinned via
+ * exactly one `eth_blockNumber` call, and every spot read, the one
+ * shared decimals read, and every quoter call across every pool and
+ * every ladder point all use that identical block.
+ *
+ * `tokenInDecimals`/`tokenOutDecimals`/`sharedAnalyticsStatus` reflect
+ * the request's ONE shared decimals read, independent of any
+ * individual pool's own per-threshold outcomes — identical semantics
+ * to `CrossPoolExecutionMatrixSnapshot`'s own fields of the same name.
+ */
+export interface VerifiedPoolDepthThresholdsSnapshot {
+  readonly status: "OK";
+  readonly blockNumber: bigint;
+  readonly tokenIn: Address;
+  readonly tokenOut: Address;
+  readonly ladderAmountsIn: readonly bigint[];
+  readonly thresholdsBps: readonly number[];
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenInDecimals?: number;
+  /** Present only when `sharedAnalyticsStatus === "OK"`. */
+  readonly tokenOutDecimals?: number;
+  readonly sharedAnalyticsStatus: QuoteAnalyticsStatus;
+  readonly sharedEvidence: readonly QuoteEvidence[];
+  readonly pools: readonly VerifiedPoolDepthResult[];
+  readonly bestVenueByThreshold: readonly BestVenueAtThreshold[];
+}
+
+/** Either a full depth-thresholds result, or the request-wide block-pin failure representation. */
+export type VerifiedPoolDepthThresholdsResult = VerifiedPoolDepthThresholdsSnapshot | VerifiedPoolDepthThresholdsBlockPinFailure;
