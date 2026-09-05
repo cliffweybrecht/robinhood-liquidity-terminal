@@ -78,8 +78,10 @@ vi.mock("@/domain/pool-quote", async (importOriginal) => {
   };
 });
 
-const { compareAssetExecutionCrossMarketFromSnapshot, resolveSelectedGroupsForCrossMarket, MAX_CROSS_MARKET_DEPTH_CELLS } = await import("../compareCrossMarket");
-const { computeVerifiedPoolDepthThresholds } = await import("@/domain/pool-quote");
+const { compareAssetExecutionCrossMarketFromSnapshot, resolveSelectedGroupsForCrossMarket } = await import("../compareCrossMarket");
+const { MAX_CROSS_MARKET_DEPTH_CELLS } = await import("../crossMarketPolicy");
+const { computeVerifiedPoolDepthThresholds, classifyMatrixCandidates } = await import("@/domain/pool-quote");
+const { planAssetExecutionCrossMarketFromSnapshot } = await import("../planCrossMarket");
 
 function group(tokenOut: ComparableExecutionGroup["tokenOut"], candidateCount: number): ComparableExecutionGroup {
   return { tokenOut, candidateCount, v3Count: candidateCount, v4Count: 0 };
@@ -411,5 +413,93 @@ describe("compareAssetExecutionCrossMarketFromSnapshot — hookData is per-candi
     expect(wethCall).toBeDefined();
     const forwardedHookData = (wethCall![0] as { candidates: readonly { hookData?: Hex }[] }).candidates[0]?.hookData;
     expect(forwardedHookData).toBe(hex);
+  });
+});
+
+describe("Planner/executor EXACT PER-GROUP candidate-assembly parity (RELEASE-CRITICAL, adversarial gap fix)", () => {
+  it("catches a per-group swap that an aggregate-only comparison would miss, AND a hookData-casing drift between planner and executor: group executable counts are DELIBERATELY ASYMMETRIC, one candidate is unlocked via MIXED-CASE hookData, and both are cross-checked by independently RE-CLASSIFYING the exact raw candidate array the executor actually handed to the quote primitive — never merely trusting either side's own self-reported number", async () => {
+    // WETH group: 2 executable V3 + 1 precondition-failed V4 (no hookData) = 3 verified, 2 executable.
+    // USDG group: 1 executable V3 + 1 precondition-failed V4 (no hookData)
+    //             + 1 hooked V4 UNLOCKED via hookData supplied under a
+    //             MIXED-CASE pairAddress key = 3 verified, 2 executable.
+    // Total executable = 4 (48 projected cells, well under the 60 cap) —
+    // chosen so the executor SUCCEEDS and reaches its sequential
+    // per-group RPC calls, letting us capture exactly what candidate
+    // array it built for EACH group individually (not just the
+    // aggregate accept/reject verdict CrossMarketDepthTooLargeError
+    // exposes). Two DISTINCT drift classes are covered simultaneously:
+    //  (a) a per-group swap (e.g. planner computing 1+3 while the
+    //      executor computes 2+2 — same aggregate, wrong per-group
+    //      split) — caught because each group's count is checked
+    //      INDIVIDUALLY, never merely summed;
+    //  (b) a hookData-lookup CASING mismatch between the two
+    //      independent candidate-assembly restatements (e.g. one side
+    //      normalizing to lowercase, the other not normalizing at all)
+    //      — caught because the supplied hookData key's casing does NOT
+    //      match either candidate's own `pairAddress` casing verbatim,
+    //      so only a correctly-normalizing lookup unlocks the candidate
+    //      on BOTH sides.
+    // The candidate's OWN pairAddress is stored MIXED-CASE (realistic —
+    // pool addresses commonly arrive checksummed), while the hookData
+    // map is keyed with the LOWERCASE form — the SAME real-world
+    // convention `requestCrossMarket.ts` already establishes at the
+    // HTTP boundary (`map.set(poolAddress.toLowerCase(), value)`). Only
+    // a lookup that correctly lowercases the CANDIDATE's own address
+    // before consulting the map — on BOTH sides — unlocks this
+    // candidate; a one-sided casing bug leaves it precondition-failed
+    // on exactly one side, breaking the cross-check below.
+    const unlockedPoolIdLower = poolId(0xb2);
+    const unlockedPoolIdMixedCase = (unlockedPoolIdLower.slice(0, 2) + unlockedPoolIdLower.slice(2).toUpperCase()) as `0x${string}`;
+    const wethCandidates = [
+      v3Candidate(addr(0xa1), WETH),
+      v3Candidate(addr(0xa2), WETH),
+      hookedV4Candidate(poolId(0xa3), WETH),
+    ];
+    const usdgCandidates = [
+      v3Candidate(addr(0xb1), USDG),
+      hookedV4Candidate(unlockedPoolIdMixedCase, USDG),
+      hookedV4Candidate(poolId(0xb3), USDG),
+    ];
+    const snapshot = snapshotFixture({
+      groups: [group(WETH, 3), group(USDG, 3)],
+      candidates: [...wethCandidates, ...usdgCandidates],
+    });
+    const hex: Hex = "0xdead";
+    const hookData = new Map([[unlockedPoolIdLower, hex]]);
+
+    // 1. The planner's own per-group executable counts, with the SAME
+    // mixed-case hookData map.
+    const plan = planAssetExecutionCrossMarketFromSnapshot(snapshot, { hookData });
+    if (plan.status !== "DESCRIBED") throw new Error("expected DESCRIBED");
+    const plannerByTokenOut = new Map(plan.groups.map((g) => [g.tokenOut, g.executableCandidateCount]));
+    expect(plannerByTokenOut.get(WETH)).toBe(2);
+    expect(plannerByTokenOut.get(USDG)).toBe(2);
+
+    // 2. Run the REAL executor (RPC/quote calls mocked, exactly like
+    // every other test in this file), with the SAME hookData map, and
+    // capture the EXACT raw candidate array it handed to
+    // computeVerifiedPoolDepthThresholds for each of its two
+    // sequential group calls.
+    const result = await compareAssetExecutionCrossMarketFromSnapshot(snapshot, { symbol: "NVDA", hookData });
+    expect(result.status).toBe("OK");
+    const mock = vi.mocked(computeVerifiedPoolDepthThresholds);
+    expect(mock.mock.calls).toHaveLength(2);
+
+    // 3. For EACH captured call, independently re-classify the EXACT
+    // array the executor actually built — via the REAL (unmocked)
+    // classifyMatrixCandidates, the SAME authoritative function
+    // classifyCrossMarketGroup itself wraps — to derive the executor's
+    // OWN true per-group executable count from its own real output,
+    // never from a number either side merely reports about itself.
+    for (const [args] of mock.mock.calls) {
+      const typedArgs = args as { candidates: readonly { pool: { pairAddress: string; quoteToken: { address: string } } }[]; tokenIn: Address };
+      const executorTokenOut = typedArgs.candidates[0]!.pool.quoteToken.address as typeof WETH;
+      const { executable } = classifyMatrixCandidates(
+        typedArgs.candidates as Parameters<typeof classifyMatrixCandidates>[0],
+        typedArgs.tokenIn,
+        4663,
+      );
+      expect(executable.length).toBe(plannerByTokenOut.get(executorTokenOut));
+    }
   });
 });
