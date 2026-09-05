@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AssetExecutableDepthDto, DepthThresholdPoolResultDto, ExecutionMatrixGroupDto } from "@/domain/execution-comparison";
+import type { AssetExecutableDepthDto, DepthThresholdPoolResultDto, ExecutionMatrixGroupDto, ExecutionSummaryDto } from "@/domain/execution-comparison";
 import {
   bestVenueText,
   depthCellStatusCopy,
@@ -14,6 +14,9 @@ import {
   poolPreconditionDetail,
   thresholdLabel,
   thresholdOutcomeText,
+  unknownReasonText,
+  venueDispositionText,
+  venueTransitionText,
 } from "./executableDepthFormatting";
 
 interface RequestBody {
@@ -228,13 +231,13 @@ function ReadyPanel({
       </div>
 
       <div aria-busy={busy} className={busy ? "opacity-60" : undefined}>
-        <DepthBody result={data.result} symbol={symbol} />
+        <DepthBody result={data.result} summary={data.summary} symbol={symbol} />
       </div>
     </div>
   );
 }
 
-function DepthBody({ result, symbol }: { result: AssetExecutableDepthDto["result"]; symbol: string }) {
+function DepthBody({ result, summary, symbol }: { result: AssetExecutableDepthDto["result"]; summary: ExecutionSummaryDto | undefined; symbol: string }) {
   if (result.status === "BLOCK_PIN_FAILURE") {
     return <div className="mt-3 rounded border border-red-800 bg-red-950/40 p-4 text-sm text-red-300">Could not pin a block for this request. Try refreshing.</div>;
   }
@@ -256,7 +259,7 @@ function DepthBody({ result, symbol }: { result: AssetExecutableDepthDto["result
       )}
 
       <div className="mt-3 rounded border border-neutral-800 p-3">
-        <h3 className="text-xs font-medium text-neutral-400">Best sampled venue</h3>
+        <h3 className="text-xs font-medium text-neutral-400">Sampled depth leader</h3>
         <dl className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {result.thresholdsBps.map((bps) => {
             const best = result.bestVenueByThreshold.find((b) => b.thresholdBps === bps);
@@ -269,6 +272,8 @@ function DepthBody({ result, symbol }: { result: AssetExecutableDepthDto["result
           })}
         </dl>
       </div>
+
+      {summary && summary.availability === "AVAILABLE" && <ExecutionSummarySection summary={summary} />}
 
       {executablePools.length === 0 ? (
         <div className="mt-3 rounded border border-neutral-800 p-4 text-sm text-neutral-400">No pools could be attempted for this output group.</div>
@@ -296,6 +301,71 @@ function DepthBody({ result, symbol }: { result: AssetExecutableDepthDto["result
         </details>
       )}
     </>
+  );
+}
+
+/**
+ * Phase 6G — Execution Intelligence Synthesis. Renders EXCLUSIVELY
+ * from `data.summary`, which is already present on the SAME response
+ * this component already fetched — no new fetch, no new trigger, no
+ * new workload of any kind. Only rendered when `availability ===
+ * "AVAILABLE"` (an "UNAVAILABLE" summary, or its absence entirely, is
+ * already covered by this component's own existing empty/failure
+ * messaging elsewhere in `DepthBody`, so nothing further is shown here
+ * in that case, avoiding redundant messaging).
+ */
+function ExecutionSummarySection({ summary }: { summary: Extract<ExecutionSummaryDto, { availability: "AVAILABLE" }> }) {
+  return (
+    <div className="mt-3 rounded border border-neutral-800 p-3">
+      <h3 className="text-xs font-medium text-neutral-400">Execution Summary</h3>
+
+      {(!summary.candidateSetComplete || !summary.sharedAnalyticsAvailable) && (
+        <div className="mt-2 space-y-1 text-xs text-amber-300">
+          {!summary.candidateSetComplete && <p>The set of verified pools for this asset did not fully settle this attempt — try Refresh.</p>}
+          {!summary.sharedAnalyticsAvailable && <p>Price-impact could not be computed for this request, so no venue could qualify at any threshold below.</p>}
+        </div>
+      )}
+
+      <div className="mt-2">
+        <h4 className="text-[10px] uppercase text-neutral-500">Sampled depth-leader changes across thresholds</h4>
+        <ul className="mt-1 space-y-1 text-xs text-neutral-300">
+          {summary.venueTransitions.map((t, i) => (
+            <li key={i}>{venueTransitionText(t)}</li>
+          ))}
+        </ul>
+      </div>
+
+      <dl className="mt-2 grid grid-cols-2 gap-2 text-xs text-neutral-300 sm:grid-cols-2">
+        <div>
+          <dt className="text-[10px] uppercase text-neutral-500">Distinct sampled depth leaders</dt>
+          <dd>{summary.venueDiversityAcrossThresholds.distinctVenueCount}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase text-neutral-500">Sampled depth-leader set changes (of 3 possible)</dt>
+          <dd>{summary.venueDiversityAcrossThresholds.venueSetChangeCount}</dd>
+        </div>
+      </dl>
+
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[11px] text-neutral-500">What this summary does not claim</summary>
+        <ul className="mt-1 space-y-1 text-[11px] text-neutral-500">
+          {summary.unknown.map((reason) => (
+            <li key={reason}>{unknownReasonText(reason)}</li>
+          ))}
+        </ul>
+      </details>
+
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[11px] text-neutral-500">Per-venue participation ({summary.venueDispositions.length})</summary>
+        <ul className="mt-1 space-y-1 text-[11px] text-neutral-500">
+          {summary.venueDispositions.map((d) => (
+            <li key={d.pairAddress}>
+              <span className="font-mono">{shortTokenLabel(d.pairAddress)}</span> — {venueDispositionText(d.status)}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
   );
 }
 

@@ -94,6 +94,24 @@ describe("compareAssetExecutionDepthThresholdsFromSnapshot", () => {
     expect(result.selectedTokenOut).toBe(WETH);
   });
 
+  it("forwards the snapshot's own verificationHealth verbatim — no re-derivation, no new RPC (Phase 6G's own candidateSetComplete depends on this)", async () => {
+    const healthySnapshot = snapshotFixture({
+      groups: [group(WETH, 1)],
+      candidates: [v3Candidate("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
+      verificationHealth: "HEALTHY",
+    });
+    const healthyResult = await compareAssetExecutionDepthThresholdsFromSnapshot(healthySnapshot, { symbol: "NVDA" });
+    expect(healthyResult.verificationHealth).toBe("HEALTHY");
+
+    const degradedSnapshot = snapshotFixture({
+      groups: [group(WETH, 1)],
+      candidates: [v3Candidate("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
+      verificationHealth: "DEGRADED",
+    });
+    const degradedResult = await compareAssetExecutionDepthThresholdsFromSnapshot(degradedSnapshot, { symbol: "NVDA" });
+    expect(degradedResult.verificationHealth).toBe("DEGRADED");
+  });
+
   it("applies the frozen DEPTH_THRESHOLD_LADDER_MULTIPLIERS, scaled by tokenDecimals — no caller override exists for this endpoint", async () => {
     expect(DEPTH_THRESHOLD_LADDER_MULTIPLIERS).toEqual([1n, 2n, 5n, 10n, 25n, 50n, 100n, 250n, 500n, 1000n, 2500n, 5000n]);
     const snapshot = snapshotFixture({

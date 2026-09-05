@@ -40,8 +40,25 @@ export type {
   DepthThresholdsResultBlockPinFailureDto,
   DepthThresholdsResultDto,
   DepthThresholdsResultSnapshotDto,
+  ExecutionSummaryAvailableDto,
+  ExecutionSummaryDto,
+  ExecutionSummaryUnavailableDto,
   UpperRangeDto,
+  VenueDispositionDto,
+  VenueTransitionDto,
 } from "./depthThresholdsDto";
+export { synthesizeExecutionSummary } from "./executionSummary";
+export type {
+  ExecutionSummary,
+  ExecutionSummaryAvailable,
+  ExecutionSummaryAvailability,
+  ExecutionSummaryUnavailable,
+  ExecutionSummaryUnknownReason,
+  VenueDisposition,
+  VenueParticipationStatus,
+  VenueTransition,
+  VenueTransitionKind,
+} from "./executionSummary";
 export {
   DepthThresholdsTooLargeError,
   ExecutionComparisonError,

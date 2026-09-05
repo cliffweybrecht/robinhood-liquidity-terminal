@@ -98,12 +98,13 @@ function snapshotResult(pools: readonly VerifiedPoolDepthResult[]): VerifiedPool
   };
 }
 
-function assetResult(result: VerifiedPoolDepthThresholdsResult): AssetExecutionDepthThresholds {
+function assetResult(result: VerifiedPoolDepthThresholdsResult, verificationHealth: "HEALTHY" | "DEGRADED" = "HEALTHY"): AssetExecutionDepthThresholds {
   return {
     asset: NVDA_ASSET,
     groups: [{ tokenOut: WETH, tokenOutSymbol: "WETH", candidateCount: 2, v3Count: 1, v4Count: 1 }],
     selectedTokenOut: WETH,
     result,
+    verificationHealth,
   };
 }
 
@@ -229,6 +230,87 @@ describe("toAssetExecutableDepthDto", () => {
     const result = snapshotResult([{ row, outcomesByThreshold: [{ thresholdBps: 50, outcome: outcome("WITHIN_THRESHOLD") }] }]);
     const dto = toAssetExecutableDepthDto(assetResult(result));
     const json = JSON.stringify(dto, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
+    expect(json).not.toContain("evidence");
+    expect(json).not.toContain("identityVerificationBlock");
+  });
+});
+
+describe("toAssetExecutableDepthDto — Phase 6G embedded summary", () => {
+  function fullSnapshotResult(pools: readonly VerifiedPoolDepthResult[]): VerifiedPoolDepthThresholdsResult {
+    return {
+      status: "OK",
+      blockNumber: 999n,
+      tokenIn: NVDA,
+      tokenOut: WETH,
+      tokenInDecimals: 18,
+      tokenOutDecimals: 18,
+      sharedAnalyticsStatus: "OK",
+      sharedEvidence: [],
+      ladderAmountsIn: [1_000_000_000_000_000_000n],
+      thresholdsBps: [50, 100, 200, 500],
+      pools,
+      bestVenueByThreshold: [
+        { thresholdBps: 50, poolAddresses: [POOL_A] },
+        { thresholdBps: 100, poolAddresses: [POOL_A] },
+        { thresholdBps: 200, poolAddresses: [] },
+        { thresholdBps: 500, poolAddresses: [] },
+      ],
+    };
+  }
+
+  it("summary is present, AVAILABLE, and stringifies blockNumber, when result.status === OK and at least one pool exists", () => {
+    const result = fullSnapshotResult([
+      { row: executableRow(POOL_A), outcomesByThreshold: [50, 100, 200, 500].map((thresholdBps) => ({ thresholdBps, outcome: outcome("WITHIN_THRESHOLD") })) },
+    ]);
+    const dto = toAssetExecutableDepthDto(assetResult(result, "HEALTHY"));
+    expect(dto.summary).toBeDefined();
+    expect(dto.summary!.availability).toBe("AVAILABLE");
+    if (dto.summary!.availability === "AVAILABLE") {
+      expect(dto.summary!.blockNumber).toBe("999");
+      expect(dto.summary!.candidateSetComplete).toBe(true);
+      expect(dto.summary!.sharedAnalyticsAvailable).toBe(true);
+    }
+  });
+
+  it("summary is absent when result.status === BLOCK_PIN_FAILURE — the outer result.status already communicates this, no redundant object embedded", () => {
+    const dto = toAssetExecutableDepthDto(
+      assetResult({ status: "BLOCK_PIN_FAILURE", tokenIn: NVDA, tokenOut: WETH, evidence: [{ kind: "BLOCK_PIN_FAILURE", outcome: "rpc_error", source: "eth_blockNumber", detail: "boom" }] }),
+    );
+    expect(dto.summary).toBeUndefined();
+  });
+
+  it("summary.candidateSetComplete reflects verificationHealth === DEGRADED correctly", () => {
+    const result = fullSnapshotResult([
+      { row: executableRow(POOL_A), outcomesByThreshold: [50, 100, 200, 500].map((thresholdBps) => ({ thresholdBps, outcome: outcome("WITHIN_THRESHOLD") })) },
+    ]);
+    const dto = toAssetExecutableDepthDto(assetResult(result, "DEGRADED"));
+    expect(dto.summary!.availability === "AVAILABLE" && dto.summary!.candidateSetComplete).toBe(false);
+  });
+
+  it("summary.venueDispositions and venueTransitions are present and correctly typed", () => {
+    const result = fullSnapshotResult([
+      { row: executableRow(POOL_A), outcomesByThreshold: [50, 100, 200, 500].map((thresholdBps) => ({ thresholdBps, outcome: outcome("WITHIN_THRESHOLD") })) },
+      { row: preconditionFailedRow(POOL_B), outcomesByThreshold: [] },
+    ]);
+    const dto = toAssetExecutableDepthDto(assetResult(result));
+    const summary = dto.summary!;
+    if (summary.availability !== "AVAILABLE") throw new Error("expected AVAILABLE");
+    expect(summary.venueDispositions).toEqual(
+      expect.arrayContaining([
+        { pairAddress: POOL_A, status: "PARTICIPATED" },
+        { pairAddress: POOL_B, status: "PRECONDITION_FAILED" },
+      ]),
+    );
+    expect(summary.venueTransitions).toHaveLength(3);
+    expect(summary.unknown).toContain("EXCLUDED_VENUES_NOT_COMPARED");
+  });
+
+  it("never leaks internal evidence fields inside the embedded summary either", () => {
+    const result = fullSnapshotResult([
+      { row: executableRow(POOL_A), outcomesByThreshold: [50, 100, 200, 500].map((thresholdBps) => ({ thresholdBps, outcome: outcome("WITHIN_THRESHOLD") })) },
+    ]);
+    const dto = toAssetExecutableDepthDto(assetResult(result));
+    const json = JSON.stringify(dto.summary, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
     expect(json).not.toContain("evidence");
     expect(json).not.toContain("identityVerificationBlock");
   });
