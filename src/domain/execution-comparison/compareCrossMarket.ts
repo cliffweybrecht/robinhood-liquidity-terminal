@@ -1,14 +1,10 @@
 import type { Hex } from "viem";
 import type { CanonicalRobinhoodAsset } from "@/domain/asset";
-import {
-  classifyMatrixCandidates,
-  computeVerifiedPoolDepthThresholds,
-  type ComparisonCandidateInput,
-  type VerifiedPoolDepthThresholdsResult,
-} from "@/domain/pool-quote";
+import { computeVerifiedPoolDepthThresholds, type ComparisonCandidateInput, type VerifiedPoolDepthThresholdsResult } from "@/domain/pool-quote";
 import { createVerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
 import { sameTokenOut } from "./compare";
 import { DEPTH_THRESHOLD_BPS, DEPTH_THRESHOLD_LADDER_MULTIPLIERS } from "./compareDepthThresholds";
+import { classifyCrossMarketGroup, computeCrossMarketBudget, resolveCrossMarketGroupSelection } from "./crossMarketPolicy";
 import { CrossMarketDepthTooLargeError, MissingTokenDecimalsError, UnknownOutputGroupError, VerificationDegradedError } from "./errors";
 import { synthesizeExecutionSummary, type ExecutionSummary } from "./executionSummary";
 import { NATIVE_ETH, type ComparableExecutionGroup, type TokenOutIdentifier, type VerifiedExecutionSnapshot } from "./types";
@@ -54,8 +50,6 @@ import { NATIVE_ETH, type ComparableExecutionGroup, type TokenOutIdentifier, typ
  * every successful group result reports EXACTLY this shared block, not
  * merely `"OK"`.
  */
-
-export const MAX_CROSS_MARKET_DEPTH_CELLS = 60;
 
 /**
  * The ONLY comparability state Phase 6H V1 can ever report. There is no
@@ -152,28 +146,17 @@ function tokenOutToString(tokenOut: TokenOutIdentifier): string {
 
 /**
  * Resolves which output-token groups this cross-market request will
- * synthesize, against the live snapshot. Omitted `requested` selects
- * every group already present on `groups`, preserving the snapshot's
- * own deterministic order (`snapshot.ts`'s `buildGroups`) — if fewer
- * than 2 groups exist:
- *  - `HEALTHY` -> `{kind: "INSUFFICIENT_MARKETS", ...}` (a settled fact,
- *    never an error — see `CrossMarketExecutionInsufficientMarkets`).
- *  - `DEGRADED` -> throws `VerificationDegradedError` (the true group
- *    count is unproven, not settled-low — mirrors
- *    `resolveSelectedTokenOutForDepthThresholds`'s own zero-group
- *    precedent, generalized to "fewer than 2").
- *
- * An explicit `requested` list is assumed already shape-validated
- * (>= 2 entries, well-formed addresses/`NATIVE_ETH`, no duplicates) by
- * the request layer — this function's only remaining job is checking
- * EXISTENCE against the live snapshot, per requested entry, in caller
- * order: a `HEALTHY` snapshot's absence is a settled fact about a bad
- * caller input (`UnknownOutputGroupError`); a `DEGRADED` snapshot's
- * absence might just be a transient verification gap
- * (`VerificationDegradedError`) — exactly the same per-entry
- * distinction `resolveSelectedTokenOutForDepthThresholds` already
- * established for the single-group case. Never silently drops or falls
- * back from an unknown requested group.
+ * synthesize, against the live snapshot. Phase 6H's own thin adapter
+ * over the ONE shared, authoritative, non-throwing decision function
+ * (`resolveCrossMarketGroupSelection`, Phase 6I) — this wrapper's ONLY
+ * job is translating that function's returned outcome into Phase 6H's
+ * OWN established observable contract (a returned domain state for
+ * `INSUFFICIENT_MARKETS`, thrown errors for `UNKNOWN_GROUP`/
+ * `DEGRADED_INDETERMINATE`), preserving this function's exact
+ * pre-existing signature/behavior for every existing caller. See
+ * `crossMarketPolicy.ts`'s own doc comment for the frozen selection
+ * semantics this delegates to — this wrapper contains NO selection
+ * decision logic of its own.
  */
 export function resolveSelectedGroupsForCrossMarket(
   symbol: string,
@@ -181,28 +164,17 @@ export function resolveSelectedGroupsForCrossMarket(
   requested: readonly TokenOutIdentifier[] | undefined,
   verificationHealth: VerifiedExecutionSnapshot["verificationHealth"],
 ): GroupSelection {
-  if (requested === undefined) {
-    if (groups.length < 2) {
-      if (verificationHealth === "DEGRADED") {
-        throw new VerificationDegradedError(symbol);
-      }
-      return { kind: "INSUFFICIENT_MARKETS", availableMarketCount: groups.length as 0 | 1 };
-    }
-    return { kind: "GROUPS", tokenOuts: groups.map((g) => g.tokenOut) };
+  const outcome = resolveCrossMarketGroupSelection(groups, requested, verificationHealth);
+  switch (outcome.kind) {
+    case "RESOLVED":
+      return { kind: "GROUPS", tokenOuts: outcome.tokenOuts };
+    case "INSUFFICIENT_MARKETS":
+      return { kind: "INSUFFICIENT_MARKETS", availableMarketCount: outcome.availableMarketCount };
+    case "UNKNOWN_GROUP":
+      throw new UnknownOutputGroupError(tokenOutToString(outcome.tokenOut));
+    case "DEGRADED_INDETERMINATE":
+      throw new VerificationDegradedError(symbol);
   }
-
-  const resolved: TokenOutIdentifier[] = [];
-  for (const tokenOut of requested) {
-    const match = groups.find((g) => sameTokenOut(g.tokenOut, tokenOut));
-    if (!match) {
-      if (verificationHealth === "DEGRADED") {
-        throw new VerificationDegradedError(symbol);
-      }
-      throw new UnknownOutputGroupError(tokenOutToString(tokenOut));
-    }
-    resolved.push(match.tokenOut);
-  }
-  return { kind: "GROUPS", tokenOuts: resolved };
 }
 
 /** The fixed 12-point ladder, in RAW base units — restated from `compareDepthThresholds.ts`'s own identical `defaultLadderAmountsIn` (private there), scaled via the SAME imported `DEPTH_THRESHOLD_LADDER_MULTIPLIERS` — never a second, independently-declared ladder. */
@@ -223,12 +195,17 @@ interface PreparedGroup {
 /**
  * Filters this group's candidates from the SAME snapshot (never a
  * second acquisition), attaches per-pool `hookData`, and classifies via
- * the SAME authoritative, PURE `classifyMatrixCandidates` every peer
- * primitive already uses — called with `snapshot.asset.chainId` (a
- * plain number already known from the snapshot), deliberately NOT
+ * the shared `classifyCrossMarketGroup` (Phase 6I policy) — itself a
+ * thin wrapper over the SAME authoritative, PURE `classifyMatrixCandidates`
+ * every peer primitive already uses. Called with `snapshot.asset.chainId`
+ * (a plain number already known from the snapshot), deliberately NOT
  * `rpc.chainId`, so this preflight step runs BEFORE any RPC client
- * exists (see `MAX_CROSS_MARKET_DEPTH_CELLS`'s own enforcement point in
- * `compareAssetExecutionCrossMarketFromSnapshot`).
+ * exists (see `computeCrossMarketBudget`'s own enforcement point in
+ * `compareAssetExecutionCrossMarketFromSnapshot`). This function still
+ * builds its OWN candidate array (never imported from `planCrossMarket.ts`
+ * — see `crossMarketPolicy.ts`'s own header comment on why candidate
+ * assembly is deliberately not centralized) because it, unlike the
+ * planner, also needs that exact array for downstream RPC execution.
  */
 function prepareGroup(snapshot: VerifiedExecutionSnapshot, tokenOut: TokenOutIdentifier, hookData: ReadonlyMap<string, Hex> | undefined): PreparedGroup {
   const groupCandidates = snapshot.candidates.filter((c) => sameTokenOut(c.tokenOut, tokenOut));
@@ -237,8 +214,8 @@ function prepareGroup(snapshot: VerifiedExecutionSnapshot, tokenOut: TokenOutIde
     identity: c.identity,
     hookData: hookData?.get(c.pool.pairAddress.toLowerCase()),
   }));
-  const { executable } = classifyMatrixCandidates(candidates, snapshot.asset.contractAddress, snapshot.asset.chainId);
-  return { tokenOut, candidates, executableCount: executable.length };
+  const { executableCandidateCount } = classifyCrossMarketGroup(candidates, tokenOut, snapshot.asset.contractAddress, snapshot.asset.chainId);
+  return { tokenOut, candidates, executableCount: executableCandidateCount };
 }
 
 /**
@@ -309,10 +286,11 @@ function assertOkDepthThresholdsResultAtSharedBlock(
  *  3. The frozen 12-point ladder is constructed.
  *  4. EVERY selected group is prepared (`prepareGroup`): candidates
  *     filtered from THIS snapshot, `hookData` attached, classified via
- *     `classifyMatrixCandidates`.
- *  5. Every prepared group's `executableCount x ladder length` is
- *     summed; exceeding `MAX_CROSS_MARKET_DEPTH_CELLS` throws
- *     `CrossMarketDepthTooLargeError` — still before any RPC call.
+ *     the shared `classifyCrossMarketGroup` (Phase 6I policy).
+ *  5. `computeCrossMarketBudget` (Phase 6I policy) sums every prepared
+ *     group's `executableCount x ladder length`; a request that does
+ *     not fit throws `CrossMarketDepthTooLargeError` — still before any
+ *     RPC call.
  *  6. Exactly ONE `createVerifiedRobinhoodRpcClient()` call.
  *  7. Exactly ONE `rpc.getBlockNumber()` call. Failure ->
  *     `{status: "BLOCK_PIN_FAILURE", asset}`, no group ever executes.
@@ -348,9 +326,9 @@ export async function compareAssetExecutionCrossMarketFromSnapshot(
 
   const prepared = selection.tokenOuts.map((tokenOut) => prepareGroup(snapshot, tokenOut, input.hookData));
 
-  const totalExecutableCells = prepared.reduce((sum, group) => sum + group.executableCount * amountsIn.length, 0);
-  if (totalExecutableCells > MAX_CROSS_MARKET_DEPTH_CELLS) {
-    throw new CrossMarketDepthTooLargeError(totalExecutableCells, MAX_CROSS_MARKET_DEPTH_CELLS);
+  const budget = computeCrossMarketBudget(prepared.map((group) => group.executableCount));
+  if (!budget.fitsExecutionBudget) {
+    throw new CrossMarketDepthTooLargeError(budget.requestProjectedCells, budget.maxCells);
   }
 
   const rpc = await createVerifiedRobinhoodRpcClient();

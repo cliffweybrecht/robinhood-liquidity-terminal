@@ -49,7 +49,6 @@ export type {
 } from "./depthThresholdsDto";
 export {
   compareAssetExecutionCrossMarketFromSnapshot,
-  MAX_CROSS_MARKET_DEPTH_CELLS,
   resolveSelectedGroupsForCrossMarket,
 } from "./compareCrossMarket";
 export type {
@@ -61,6 +60,28 @@ export type {
   CrossMarketExecutionOk,
   CrossMarketValueComparisonUnavailable,
 } from "./compareCrossMarket";
+export {
+  classifyCrossMarketGroup,
+  computeCrossMarketBudget,
+  MAX_CROSS_MARKET_DEPTH_CELLS,
+  MIN_CROSS_MARKET_OUTPUT_MARKETS,
+  resolveCrossMarketGroupSelection,
+} from "./crossMarketPolicy";
+export type {
+  CrossMarketExecutionBudget,
+  CrossMarketGroupClassification,
+  CrossMarketGroupSelectionOutcome,
+} from "./crossMarketPolicy";
+export { planAssetExecutionCrossMarketFromSnapshot } from "./planCrossMarket";
+export type {
+  AssetCrossMarketExecutionPlan,
+  AssetCrossMarketExecutionPlanDescribed,
+  AssetCrossMarketExecutionPlanIndeterminate,
+  AssetCrossMarketExecutionPlanInsufficientMarkets,
+  AssetCrossMarketExecutionPlanUnknownGroup,
+  CrossMarketExecutionPlanGroup,
+  PlanAssetExecutionCrossMarketInput,
+} from "./planCrossMarket";
 export { toAssetCrossMarketExecutionDto } from "./crossMarketDto";
 export type {
   AssetCrossMarketExecutionDto,
