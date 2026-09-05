@@ -52,6 +52,21 @@ export interface ComputeVerifiedPoolDepthThresholdsInput {
   /** The fixed threshold set, in bps — this primitive owns no default threshold set either; the frozen `[50, 100, 200, 500]` values live at the orchestration layer, exactly mirroring `amountsIn`'s own placement. */
   readonly thresholdsBps: readonly number[];
   readonly rpc: VerifiedRobinhoodRpcClient;
+  /**
+   * Externally pinned block — when supplied, this primitive uses it
+   * VERBATIM for every decimals/spot/quote read and makes ZERO
+   * `eth_blockNumber` calls of its own (no `BLOCK_PIN_FAILURE` path is
+   * reachable in that case — pinning is entirely the caller's
+   * responsibility). When omitted, behavior is EXACTLY as before this
+   * field existed: this primitive pins its own block via exactly one
+   * `rpc.getBlockNumber()` call. Added for Phase 6H (cross-market
+   * synthesis), whose orchestrator pins ONE block for multiple
+   * `tokenOut` groups and calls this primitive once per group with that
+   * same value — see `execution-comparison/compareCrossMarket.ts`. This
+   * primitive itself remains single-group; it has no awareness of any
+   * other group sharing its block.
+   */
+  readonly blockNumber?: bigint;
 }
 
 type ExecutableRow = ReturnType<typeof classifyMatrixCandidates>["executable"][number];
@@ -298,10 +313,13 @@ function deriveThresholdOutcome(cells: readonly MatrixCell[], thresholdBps: numb
  *  3. `executable.length * amountsIn.length > MAX_DEPTH_THRESHOLD_CELLS`
  *     throws `DepthThresholdsTooLargeError` here, computed against the
  *     EXECUTABLE count only, never the raw candidate count.
- *  4. Exactly ONE `eth_blockNumber` call pins `blockNumber` for the
- *     ENTIRE request — every spot read, the one shared decimals read,
- *     and every quoter call in this SAME request use this identical
- *     value. Failure -> `{status: "BLOCK_PIN_FAILURE", ...}`.
+ *  4. If `input.blockNumber` is supplied, it is used VERBATIM and this
+ *     step makes ZERO `eth_blockNumber` calls (no `BLOCK_PIN_FAILURE`
+ *     is reachable in that case). Otherwise, exactly ONE
+ *     `eth_blockNumber` call pins `blockNumber` for the ENTIRE request
+ *     — every spot read, the one shared decimals read, and every
+ *     quoter call in this SAME request use this identical value.
+ *     Failure -> `{status: "BLOCK_PIN_FAILURE", ...}`.
  *  5. Exactly ONE shared decimals read (`readSharedDecimals`).
  *  6. Exactly ONE spot read PER EXECUTABLE POOL (never per sample),
  *     fired via `mapWithBoundedConcurrency`/`DEPTH_CURVE_CONCURRENCY`
@@ -365,22 +383,26 @@ export async function computeVerifiedPoolDepthThresholds(input: ComputeVerifiedP
   const tokenInIsToken0 = tokenIn.toLowerCase() < tokenOut.toLowerCase();
 
   let blockNumber: bigint;
-  try {
-    blockNumber = await rpc.getBlockNumber();
-  } catch (error) {
-    return {
-      status: "BLOCK_PIN_FAILURE",
-      tokenIn,
-      tokenOut,
-      evidence: [
-        {
-          kind: "BLOCK_PIN_FAILURE",
-          outcome: "rpc_error",
-          source: "eth_blockNumber",
-          detail: `Could not pin a block for this depth-threshold request: ${describeError(error)}`,
-        },
-      ],
-    };
+  if (input.blockNumber !== undefined) {
+    blockNumber = input.blockNumber;
+  } else {
+    try {
+      blockNumber = await rpc.getBlockNumber();
+    } catch (error) {
+      return {
+        status: "BLOCK_PIN_FAILURE",
+        tokenIn,
+        tokenOut,
+        evidence: [
+          {
+            kind: "BLOCK_PIN_FAILURE",
+            outcome: "rpc_error",
+            source: "eth_blockNumber",
+            detail: `Could not pin a block for this depth-threshold request: ${describeError(error)}`,
+          },
+        ],
+      };
+    }
   }
 
   const firstV4 = executable.find((r): r is Extract<ExecutableRow, { kind: "v4" }> => r.kind === "v4");

@@ -47,6 +47,35 @@ export type {
   VenueDispositionDto,
   VenueTransitionDto,
 } from "./depthThresholdsDto";
+export {
+  compareAssetExecutionCrossMarketFromSnapshot,
+  MAX_CROSS_MARKET_DEPTH_CELLS,
+  resolveSelectedGroupsForCrossMarket,
+} from "./compareCrossMarket";
+export type {
+  AssetCrossMarketExecution,
+  CompareAssetExecutionCrossMarketInput,
+  CrossMarketExecutionBlockPinFailure,
+  CrossMarketExecutionGroup,
+  CrossMarketExecutionInsufficientMarkets,
+  CrossMarketExecutionOk,
+  CrossMarketValueComparisonUnavailable,
+} from "./compareCrossMarket";
+export { toAssetCrossMarketExecutionDto } from "./crossMarketDto";
+export type {
+  AssetCrossMarketExecutionDto,
+  CrossMarketExecutionBlockPinFailureDto,
+  CrossMarketExecutionGroupDto,
+  CrossMarketExecutionInsufficientMarketsDto,
+  CrossMarketExecutionOkDto,
+} from "./crossMarketDto";
+export { parseCrossMarketRequestShape } from "./requestCrossMarket";
+export type {
+  CrossMarketRequestValidationError,
+  CrossMarketRequestValidationErrorCode,
+  ParseCrossMarketRequestShapeResult,
+  ParsedCrossMarketRequestShape,
+} from "./requestCrossMarket";
 export { synthesizeExecutionSummary } from "./executionSummary";
 export type {
   ExecutionSummary,
@@ -60,6 +89,7 @@ export type {
   VenueTransitionKind,
 } from "./executionSummary";
 export {
+  CrossMarketDepthTooLargeError,
   DepthThresholdsTooLargeError,
   ExecutionComparisonError,
   MatrixTooLargeError,
