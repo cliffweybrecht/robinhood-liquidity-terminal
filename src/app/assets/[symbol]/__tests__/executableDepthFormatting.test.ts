@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { DepthThresholdCellDto, DepthThresholdOutcomeDto, DepthThresholdPoolResultDto } from "@/domain/execution-comparison";
+import type {
+  DepthThresholdCellDto,
+  DepthThresholdOutcomeDto,
+  DepthThresholdPoolResultDto,
+  ExecutionSummaryUnknownReason,
+  VenueParticipationStatus,
+  VenueTransitionKind,
+} from "@/domain/execution-comparison";
 import {
   bestVenueText,
   depthCellStatusCopy,
@@ -8,6 +15,9 @@ import {
   poolPreconditionDetail,
   thresholdLabel,
   thresholdOutcomeText,
+  unknownReasonText,
+  venueDispositionText,
+  venueTransitionText,
 } from "../executableDepthFormatting";
 
 const POOL_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -192,5 +202,80 @@ describe("bestVenueText", () => {
     const text = bestVenueText([POOL_A, POOL_B]);
     expect(text).toContain("0xaaaa…aaaa");
     expect(text).toContain("0xbbbb…bbbb");
+  });
+});
+
+describe("Phase 6G presentation copy — exhaustive mapping", () => {
+  const ALL_VENUE_PARTICIPATION_STATUSES: readonly VenueParticipationStatus[] = ["PARTICIPATED", "PRECONDITION_FAILED", "NO_QUOTED_SAMPLES", "ANALYTICS_UNAVAILABLE"];
+  const ALL_VENUE_TRANSITION_KINDS: readonly VenueTransitionKind[] = ["NO_DIFFERENCE", "WINNER_SET_DIFFERS", "SOLE_WINNER_CHANGED"];
+  const ALL_UNKNOWN_REASONS: readonly ExecutionSummaryUnknownReason[] = [
+    "CROSS_GROUP_COMPARISON_NOT_ATTEMPTED",
+    "UNSAMPLED_TRADE_SIZES_UNKNOWN",
+    "FUTURE_BLOCK_EXECUTION_UNKNOWN",
+    "EXCLUDED_VENUES_NOT_COMPARED",
+  ];
+
+  it("venueDispositionText has a non-empty entry for every VenueParticipationStatus", () => {
+    for (const status of ALL_VENUE_PARTICIPATION_STATUSES) {
+      expect(venueDispositionText(status).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("venueTransitionText has a non-empty entry for every VenueTransitionKind, and never uses 'changed' for WINNER_SET_DIFFERS", () => {
+    for (const kind of ALL_VENUE_TRANSITION_KINDS) {
+      const text = venueTransitionText({ kind, fromThresholdBps: 50, toThresholdBps: 100 });
+      expect(text.length).toBeGreaterThan(0);
+    }
+    const winnerSetDiffers = venueTransitionText({ kind: "WINNER_SET_DIFFERS", fromThresholdBps: 50, toThresholdBps: 100 });
+    expect(winnerSetDiffers.toLowerCase()).not.toContain("changed");
+    const soleWinnerChanged = venueTransitionText({ kind: "SOLE_WINNER_CHANGED", fromThresholdBps: 50, toThresholdBps: 100 });
+    expect(soleWinnerChanged.toLowerCase()).toContain("changed");
+  });
+
+  it("venueTransitionText includes both threshold labels", () => {
+    const text = venueTransitionText({ kind: "NO_DIFFERENCE", fromThresholdBps: 100, toThresholdBps: 200 });
+    expect(text).toContain("1%");
+    expect(text).toContain("2%");
+  });
+
+  it("unknownReasonText has a non-empty entry for every ExecutionSummaryUnknownReason", () => {
+    for (const reason of ALL_UNKNOWN_REASONS) {
+      expect(unknownReasonText(reason).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("no Phase 6G copy string ever claims continuous/exact depth or uses advisory/recommendation language", () => {
+    const allCopy = [
+      ...ALL_VENUE_PARTICIPATION_STATUSES.map(venueDispositionText),
+      ...ALL_VENUE_TRANSITION_KINDS.map((kind) => venueTransitionText({ kind, fromThresholdBps: 50, toThresholdBps: 100 })),
+      ...ALL_UNKNOWN_REASONS.map(unknownReasonText),
+    ].join(" ").toLowerCase();
+    expect(allCopy).not.toMatch(/should trade|recommend|you should|best choice for you/);
+    // "continuous depth" legitimately appears once, but ONLY inside an explicit
+    // disclaimer ("nothing about ... continuous depth ... is claimed") — the
+    // real adversarial check is that it is never used to AFFIRM continuous/exact
+    // depth (e.g. "shows continuous depth", "provides exact depth").
+    expect(allCopy).not.toMatch(/(shows|provides|represents|is) (a )?(continuous|exact) depth/);
+  });
+
+  it("NEVER describes bestVenueByThreshold using 'best-priced'/'best price'/'best execution price' — bestVenueByThreshold names the sampled qualifying-depth leader(s), not a price/execution-quality claim", () => {
+    const allCopy = [
+      ...ALL_VENUE_PARTICIPATION_STATUSES.map(venueDispositionText),
+      ...ALL_VENUE_TRANSITION_KINDS.map((kind) => venueTransitionText({ kind, fromThresholdBps: 50, toThresholdBps: 100 })),
+      ...ALL_UNKNOWN_REASONS.map(unknownReasonText),
+    ].join(" ").toLowerCase();
+    expect(allCopy).not.toContain("best-priced");
+    expect(allCopy).not.toContain("best price");
+    expect(allCopy).not.toContain("best execution price");
+    expect(allCopy).not.toContain("best-price");
+  });
+
+  it("uses the frozen 'sampled depth leader' vocabulary for venue-transition copy, precisely describing bestVenueByThreshold's own actual metric (greatest sampled qualifying depth, tie-preserved)", () => {
+    const noDifference = venueTransitionText({ kind: "NO_DIFFERENCE", fromThresholdBps: 50, toThresholdBps: 100 });
+    const winnerSetDiffers = venueTransitionText({ kind: "WINNER_SET_DIFFERS", fromThresholdBps: 50, toThresholdBps: 100 });
+    const soleWinnerChanged = venueTransitionText({ kind: "SOLE_WINNER_CHANGED", fromThresholdBps: 50, toThresholdBps: 100 });
+    expect(noDifference.toLowerCase()).toContain("sampled depth leader");
+    expect(winnerSetDiffers.toLowerCase()).toContain("sampled depth leader");
+    expect(soleWinnerChanged.toLowerCase()).toContain("sampled depth leader");
   });
 });

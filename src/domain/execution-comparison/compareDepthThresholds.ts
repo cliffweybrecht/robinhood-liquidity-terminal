@@ -23,6 +23,17 @@ export interface AssetExecutionDepthThresholds {
   readonly groups: readonly ComparableExecutionGroup[];
   readonly selectedTokenOut: TokenOutIdentifier;
   readonly result: VerifiedPoolDepthThresholdsResult;
+  /**
+   * Phase 6G — threaded through from the SAME `snapshot` this whole
+   * result was already built from (no new read, no new RPC): whether
+   * identity verification for this symbol settled completely this
+   * attempt. Added specifically so `executionSummary.ts`'s
+   * `candidateSetComplete` can be derived without re-fetching or
+   * re-deriving anything — this field was already sitting on
+   * `snapshot.verificationHealth` and was simply not being forwarded
+   * to this function's own return shape before Phase 6G needed it.
+   */
+  readonly verificationHealth: VerifiedExecutionSnapshot["verificationHealth"];
 }
 
 /**
@@ -158,7 +169,7 @@ export async function compareAssetExecutionDepthThresholdsFromSnapshot(
     rpc,
   });
 
-  return { asset: snapshot.asset, groups: snapshot.groups, selectedTokenOut, result };
+  return { asset: snapshot.asset, groups: snapshot.groups, selectedTokenOut, result, verificationHealth: snapshot.verificationHealth };
 }
 
 // Exported for tests only.

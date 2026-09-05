@@ -1,4 +1,13 @@
-import type { DepthThresholdCellDto, DepthThresholdOutcomeDto, DepthThresholdPoolResultDto, ExecutionCandidateDto } from "@/domain/execution-comparison";
+import type {
+  DepthThresholdCellDto,
+  DepthThresholdOutcomeDto,
+  DepthThresholdPoolResultDto,
+  ExecutionCandidateDto,
+  ExecutionSummaryUnknownReason,
+  VenueParticipationStatus,
+  VenueTransitionDto,
+  VenueTransitionKind,
+} from "@/domain/execution-comparison";
 import { amountInLabel, formatAmountOut, formatGasEstimate, formatGroupLabel, formatImpactPercent, PRECONDITION_DETAIL_COPY, statusCopy } from "./executionFormatting";
 
 /**
@@ -117,4 +126,59 @@ export function monotonicityCautionText(outcome: DepthThresholdOutcomeDto): stri
 export function bestVenueText(poolAddresses: readonly string[]): string {
   if (poolAddresses.length === 0) return "No tested venue qualifies at this threshold.";
   return poolAddresses.map((a) => `${a.slice(0, 6)}…${a.slice(-4)}`).join(", ");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6G — Execution Intelligence Synthesis presentation copy. Every
+// table below is a `Record<Union, string>` DELIBERATELY (not a
+// `switch`/partial map) — TypeScript itself refuses to compile if a
+// union member is ever added without a corresponding copy entry here,
+// an exhaustiveness guarantee enforced at compile time, backed by a
+// runtime test asserting the same. The domain/DTO layers carry ONLY
+// the typed codes above; this is the ONE place their prose lives.
+// ---------------------------------------------------------------------------
+
+const VENUE_PARTICIPATION_COPY: Record<VenueParticipationStatus, string> = {
+  PARTICIPATED: "This pool was measured against every threshold.",
+  PRECONDITION_FAILED: "This pool could not be quoted at all — see the precondition detail below.",
+  NO_QUOTED_SAMPLES: "Every tested sample failed to quote for this pool at this block.",
+  ANALYTICS_UNAVAILABLE: "This pool's quotes succeeded, but price-impact could not be computed at this block.",
+};
+
+/** Reuses `VENUE_PARTICIPATION_COPY` verbatim — never a second, independently-written copy table. */
+export function venueDispositionText(status: VenueParticipationStatus): string {
+  return VENUE_PARTICIPATION_COPY[status];
+}
+
+/**
+ * Deliberately says "sampled depth leader(s)," never "best-priced" —
+ * `bestVenueByThreshold` (the field this copy describes) names the
+ * pool(s) with the greatest sampled QUALIFYING TRADE SIZE at a given
+ * impact threshold (`qualifyingAmountIn`, tie-preserved), which is NOT
+ * the same claim as "best execution price" or "best quote at a given
+ * trade size" — this copy must never imply either. See the
+ * Executable-Depth Thresholds frozen plan's own `sampledDepthAtBps`
+ * semantics for the underlying metric this describes.
+ */
+const VENUE_TRANSITION_COPY: Record<VenueTransitionKind, string> = {
+  NO_DIFFERENCE: "The set of sampled depth leaders is the same at both thresholds.",
+  WINNER_SET_DIFFERS: "The set of sampled depth leaders differs between these two thresholds — at least one side involved a tie, so this is not a proven single-venue change.",
+  SOLE_WINNER_CHANGED: "The sole sampled depth leader changed between these two thresholds.",
+};
+
+/** Never uses the word "changed" for `WINNER_SET_DIFFERS` — only `SOLE_WINNER_CHANGED` (an untied leader on both sides) earns that word, per the frozen schema's own stress-tested semantics. */
+export function venueTransitionText(transition: Pick<VenueTransitionDto, "kind" | "fromThresholdBps" | "toThresholdBps">): string {
+  return `${thresholdLabel(transition.fromThresholdBps)} → ${thresholdLabel(transition.toThresholdBps)}: ${VENUE_TRANSITION_COPY[transition.kind]}`;
+}
+
+const UNKNOWN_REASON_COPY: Record<ExecutionSummaryUnknownReason, string> = {
+  CROSS_GROUP_COMPARISON_NOT_ATTEMPTED: "This summary never compares across different output tokens (e.g. WETH vs. USDG) — only the currently selected group.",
+  UNSAMPLED_TRADE_SIZES_UNKNOWN: "Only the 12 tested trade sizes are known — nothing about any other size, or continuous depth, is claimed.",
+  FUTURE_BLOCK_EXECUTION_UNKNOWN: "Every fact here reflects one specific historical block — nothing about any later block is known.",
+  EXCLUDED_VENUES_NOT_COMPARED: "One or more verified pools could not be included in this comparison — see per-pool detail below.",
+};
+
+/** Reuses `UNKNOWN_REASON_COPY` verbatim. */
+export function unknownReasonText(reason: ExecutionSummaryUnknownReason): string {
+  return UNKNOWN_REASON_COPY[reason];
 }

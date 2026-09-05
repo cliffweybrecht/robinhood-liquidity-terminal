@@ -1,3 +1,4 @@
+import type { Hex } from "viem";
 import type {
   ComparisonCandidateStatus,
   DepthThresholdOutcome,
@@ -8,6 +9,7 @@ import type {
 } from "@/domain/pool-quote";
 import type { AssetExecutionDepthThresholds } from "./compareDepthThresholds";
 import type { PreconditionFailureDto, RationalDto } from "./dto";
+import { synthesizeExecutionSummary, type ExecutionSummary, type ExecutionSummaryUnknownReason, type VenueParticipationStatus, type VenueTransitionKind } from "./executionSummary";
 import type { ExecutionMatrixGroupDto } from "./matrixDto";
 import { NATIVE_ETH, type TokenOutIdentifier } from "./types";
 
@@ -95,10 +97,89 @@ export interface DepthThresholdsResultBlockPinFailureDto {
 
 export type DepthThresholdsResultDto = DepthThresholdsResultSnapshotDto | DepthThresholdsResultBlockPinFailureDto;
 
+// ---------------------------------------------------------------------------
+// Phase 6G — Execution Intelligence Synthesis DTO. Mirrors
+// `executionSummary.ts`'s own domain types field-for-field; every
+// `bigint` explicitly `.toString()`'d, no generic/recursive mapping.
+// Presentation copy for these codes lives EXCLUSIVELY in
+// `executableDepthFormatting.ts` — never here.
+// ---------------------------------------------------------------------------
+
+export interface VenueDispositionDto {
+  readonly pairAddress: string;
+  readonly status: VenueParticipationStatus;
+}
+
+export interface VenueTransitionDto {
+  readonly fromThresholdBps: number;
+  readonly toThresholdBps: number;
+  readonly kind: VenueTransitionKind;
+  readonly fromVenues: readonly string[];
+  readonly toVenues: readonly string[];
+}
+
+export interface ExecutionSummaryUnavailableDto {
+  readonly availability: "UNAVAILABLE";
+  readonly tokenIn: string;
+  readonly tokenOut: string;
+  readonly unknown: readonly ExecutionSummaryUnknownReason[];
+}
+
+export interface ExecutionSummaryAvailableDto {
+  readonly availability: "AVAILABLE";
+  readonly tokenIn: string;
+  readonly tokenOut: string;
+  readonly blockNumber: string;
+  readonly candidateSetComplete: boolean;
+  readonly sharedAnalyticsAvailable: boolean;
+  readonly venueDispositions: readonly VenueDispositionDto[];
+  readonly bestVenueByThreshold: readonly BestVenueAtThresholdDto[];
+  readonly venueTransitions: readonly VenueTransitionDto[];
+  readonly venueDiversityAcrossThresholds: {
+    readonly distinctVenueCount: number;
+    readonly venueSetChangeCount: number;
+  };
+  readonly unknown: readonly ExecutionSummaryUnknownReason[];
+}
+
+export type ExecutionSummaryDto = ExecutionSummaryAvailableDto | ExecutionSummaryUnavailableDto;
+
+function toVenueAddresses(addresses: readonly Hex[]): readonly string[] {
+  return [...addresses];
+}
+
+/** The ONLY function permitted to construct the browser-facing `ExecutionSummary` response shape — every field explicit, nothing forwarded by reference. */
+function toExecutionSummaryDto(summary: ExecutionSummary): ExecutionSummaryDto {
+  if (summary.availability === "UNAVAILABLE") {
+    return { availability: "UNAVAILABLE", tokenIn: summary.tokenIn, tokenOut: tokenOutToString(summary.tokenOut), unknown: [...summary.unknown] };
+  }
+  return {
+    availability: "AVAILABLE",
+    tokenIn: summary.tokenIn,
+    tokenOut: tokenOutToString(summary.tokenOut),
+    blockNumber: summary.blockNumber.toString(),
+    candidateSetComplete: summary.candidateSetComplete,
+    sharedAnalyticsAvailable: summary.sharedAnalyticsAvailable,
+    venueDispositions: summary.venueDispositions.map((d) => ({ pairAddress: d.pairAddress, status: d.status })),
+    bestVenueByThreshold: summary.bestVenueByThreshold.map((b) => ({ thresholdBps: b.thresholdBps, poolAddresses: toVenueAddresses(b.poolAddresses) })),
+    venueTransitions: summary.venueTransitions.map((t) => ({
+      fromThresholdBps: t.fromThresholdBps,
+      toThresholdBps: t.toThresholdBps,
+      kind: t.kind,
+      fromVenues: toVenueAddresses(t.fromVenues),
+      toVenues: toVenueAddresses(t.toVenues),
+    })),
+    venueDiversityAcrossThresholds: { ...summary.venueDiversityAcrossThresholds },
+    unknown: [...summary.unknown],
+  };
+}
+
 export interface AssetExecutableDepthDto {
   readonly groups: readonly ExecutionMatrixGroupDto[];
   readonly selectedTokenOut: string;
   readonly result: DepthThresholdsResultDto;
+  /** Present only when `result.status === "OK"` — Phase 6G's pure synthesis over the SAME already-fetched result above; never a second fetch, never a second block. */
+  readonly summary?: ExecutionSummaryDto;
 }
 
 /** Restated locally, not imported — `dto.ts`/`matrixDto.ts`'s own identical private helpers are not exported (`matrixDto.ts` restates its own copy of both rather than importing from `dto.ts`, the same established precedent this file follows). */
@@ -180,8 +261,26 @@ function toResultDto(result: VerifiedPoolDepthThresholdsResult, fetchedAt: strin
   };
 }
 
-/** The ONLY function permitted to construct the browser-facing Executable-Depth Thresholds response body — every field is explicit, named, and independently mapped; nothing from the domain result is ever forwarded by reference or via a generic/recursive pass-through. */
+/**
+ * The ONLY function permitted to construct the browser-facing
+ * Executable-Depth Thresholds response body — every field is explicit,
+ * named, and independently mapped; nothing from the domain result is
+ * ever forwarded by reference or via a generic/recursive pass-through.
+ *
+ * `summary` (Phase 6G) is computed here, from the SAME already-fetched
+ * `result.result` and `result.verificationHealth` — `synthesizeExecutionSummary`
+ * is a pure, synchronous function; this call issues no RPC, pins no
+ * block, and never re-fetches anything. Present only when the
+ * underlying result is `"OK"` (mirroring exactly when `pools`/
+ * `bestVenueByThreshold` are themselves present) — `synthesizeExecutionSummary`
+ * itself already returns `{availability: "UNAVAILABLE"}` for a
+ * `BLOCK_PIN_FAILURE`/zero-pool result, but that case is deliberately
+ * NOT embedded on this DTO at all (rather than embedding a redundant
+ * "unavailable" object) since `result.status !== "OK"` already
+ * communicates the identical fact to any consumer.
+ */
 export function toAssetExecutableDepthDto(result: AssetExecutionDepthThresholds, fetchedAt: string = new Date().toISOString()): AssetExecutableDepthDto {
+  const summary = result.result.status === "OK" ? synthesizeExecutionSummary(result.result, result.verificationHealth) : undefined;
   return {
     groups: result.groups.map((g) => ({
       tokenOut: tokenOutToString(g.tokenOut),
@@ -192,5 +291,6 @@ export function toAssetExecutableDepthDto(result: AssetExecutionDepthThresholds,
     })),
     selectedTokenOut: tokenOutToString(result.selectedTokenOut),
     result: toResultDto(result.result, fetchedAt),
+    summary: summary ? toExecutionSummaryDto(summary) : undefined,
   };
 }
