@@ -21,6 +21,8 @@ import { UINT128_MAX } from "../read-uniswap-v4-quote";
 import type { DepthThresholdOutcome, VerifiedPoolDepthThresholdsSnapshot } from "../types";
 import {
   decimalsReturn,
+  DEFAULT_FEE,
+  DEFAULT_TICK_SPACING,
   HOOK_ADDRESS,
   NVDA,
   QUOTE_BLOCK,
@@ -34,7 +36,7 @@ import {
   WETH,
   type RpcStub,
 } from "./fixtures";
-import type { VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
+import type { BlockTag, VerifiedRobinhoodRpcClient } from "@/providers/robinhood-rpc";
 
 // This file NEVER imports `executeCell`/`classifySpot` from
 // `../compare-verified-pools-across-amounts` — verifying Correction 1's
@@ -78,12 +80,12 @@ function buildFakeDepthRpc(args: {
   getBlockNumber?: (() => Promise<bigint>) | { error: unknown };
 }): {
   rpc: VerifiedRobinhoodRpcClient;
-  calls: { getBlockNumberCalls: number; callsByKind: Record<string, number>; callLog: Array<{ kind: string; to: string; at: number }> };
+  calls: { getBlockNumberCalls: number; callsByKind: Record<string, number>; callLog: Array<{ kind: string; to: string; at: number; blockTag: BlockTag }> };
 } {
-  const calls = { getBlockNumberCalls: 0, callsByKind: {} as Record<string, number>, callLog: [] as Array<{ kind: string; to: string; at: number }> };
-  const bump = (kind: string, to: string) => {
+  const calls = { getBlockNumberCalls: 0, callsByKind: {} as Record<string, number>, callLog: [] as Array<{ kind: string; to: string; at: number; blockTag: BlockTag }> };
+  const bump = (kind: string, to: string, blockTag: BlockTag) => {
     calls.callsByKind[kind] = (calls.callsByKind[kind] ?? 0) + 1;
-    calls.callLog.push({ kind, to, at: Date.now() });
+    calls.callLog.push({ kind, to, at: Date.now(), blockTag });
   };
 
   const v3QuoteSelector = encodeQuoteExactInputSingleV3Call(NVDA, USDG, UNIT, 500).slice(0, 10);
@@ -112,25 +114,25 @@ function buildFakeDepthRpc(args: {
     getCode: async () => {
       throw new Error("unstubbed: getCode");
     },
-    call: async (request) => {
+    call: async (request, blockTag = "latest") => {
       const selector = request.data.slice(0, 10);
 
       if (selector === decimalsSelector) {
-        bump("decimals", request.to);
+        bump("decimals", request.to, blockTag);
         const key = request.to.toLowerCase();
         const stub = args.decimalsByAddress?.[key];
         return resolveStub(stub, decimalsReturn(18));
       }
 
       if (selector === slot0Selector) {
-        bump("spot", request.to);
+        bump("spot", request.to, blockTag);
         const row = args.rows.find((r) => r.kind === "v3" && (r.toOrPoolId as string).toLowerCase() === request.to.toLowerCase());
         return resolveStub(row?.slot0, slot0V3Return());
       }
 
       if (selector === getSlot0Selector) {
         const poolId = `0x${word(request.data, 0)}` as Hex;
-        bump("spot", poolId);
+        bump("spot", poolId, blockTag);
         const row = args.rows.find((r) => r.kind === "v4" && (r.toOrPoolId as string).toLowerCase() === poolId.toLowerCase());
         return resolveStub(row?.slot0, slot0V4Return());
       }
@@ -138,7 +140,7 @@ function buildFakeDepthRpc(args: {
       if (selector === v3QuoteSelector) {
         const fee = Number(BigInt(`0x${word(request.data, 3)}`));
         const amountIn = BigInt(`0x${word(request.data, 2)}`);
-        bump("quote", `v3:${fee}:${amountIn}`);
+        bump("quote", `v3:${fee}:${amountIn}`, blockTag);
         const cell = args.cells.find((c) => c.v3Fee === fee && c.amountIn === amountIn);
         if (!cell) throw new Error(`no cell stub for v3 fee=${fee} amountIn=${amountIn}`);
         return resolveStub(cell.quote, v3QuoteReturn());
@@ -150,7 +152,7 @@ function buildFakeDepthRpc(args: {
         const tickSpacing = Number(tickSpacingRaw > (1n << 255n) ? tickSpacingRaw - (1n << 256n) : tickSpacingRaw);
         const hooks = `0x${word(request.data, 5).slice(24)}`.toLowerCase();
         const amountIn = BigInt(`0x${word(request.data, 7)}`);
-        bump("quote", `v4:${fee}:${tickSpacing}:${hooks}:${amountIn}`);
+        bump("quote", `v4:${fee}:${tickSpacing}:${hooks}:${amountIn}`, blockTag);
         const cell = args.cells.find(
           (c) => c.v4Key && c.v4Key.fee === fee && c.v4Key.tickSpacing === tickSpacing && c.v4Key.hooks.toLowerCase() === hooks && c.amountIn === amountIn,
         );
@@ -282,6 +284,117 @@ describe("computeVerifiedPoolDepthThresholds — same-block invariant", () => {
     expect(calls.callsByKind["decimals"]).toBeUndefined();
     expect(calls.callsByKind["spot"]).toBeUndefined();
     expect(calls.callsByKind["quote"]).toBeUndefined();
+  });
+});
+
+describe("computeVerifiedPoolDepthThresholds — externally supplied blockNumber (Phase 6H, additive-only input)", () => {
+  // Deliberately DIFFERENT from `QUOTE_BLOCK` (the fake RPC's own
+  // getBlockNumber fallback) — if this primitive ever self-pinned
+  // despite receiving an explicit blockNumber, the result would come
+  // back at QUOTE_BLOCK instead, and every assertion below comparing
+  // against SUPPLIED_BLOCK would fail.
+  const SUPPLIED_BLOCK = 777_777n;
+
+  it("supplied blockNumber -> ZERO getBlockNumber calls, and the result reports the SUPPLIED value verbatim", async () => {
+    const { pool, identity } = v3ComparisonCandidate({ pairAddress: V3_A, fee: 500 });
+    const rows: RowStub[] = [{ kind: "v3", toOrPoolId: V3_A }];
+    const cells: CellStub[] = LADDER.map((amountIn) => ({ v3Fee: 500, amountIn, quote: v3QuoteReturn({ amountOut: amountIn / 2n }) }));
+    const { rpc, calls } = buildFakeDepthRpc({ rows, cells });
+    const result = asOk(
+      await computeVerifiedPoolDepthThresholds({ candidates: [{ pool, identity }], tokenIn: NVDA, amountsIn: LADDER, thresholdsBps: THRESHOLDS, rpc, blockNumber: SUPPLIED_BLOCK }),
+    );
+    expect(calls.getBlockNumberCalls).toBe(0);
+    expect(result.blockNumber).toBe(SUPPLIED_BLOCK);
+  });
+
+  it("supplied blockNumber reaches the one shared decimals read, every spot read, and every quote call — the SAME single value threaded through every downstream call, exactly as the self-pinned path already guarantees", async () => {
+    const c1 = v3ComparisonCandidate({ pairAddress: V3_A, fee: 500, token1: WETH });
+    const c2Poolid = "0xaa000000000000000000000000000000000000000000000000000000000000ab" as Hex;
+    const c2 = v4ComparisonCandidate({ poolId: c2Poolid, currency0: WETH, currency1: NVDA });
+    const rows: RowStub[] = [
+      { kind: "v3", toOrPoolId: V3_A },
+      { kind: "v4", toOrPoolId: c2Poolid },
+    ];
+    const cells: CellStub[] = LADDER.flatMap((amountIn) => [
+      { v3Fee: 500, amountIn, quote: v3QuoteReturn({ amountOut: amountIn / 2n }) },
+      { v4Key: { fee: DEFAULT_FEE, tickSpacing: DEFAULT_TICK_SPACING, hooks: "0x0000000000000000000000000000000000000000" as Address }, amountIn, quote: v4QuoteReturn({ amountOut: amountIn / 2n }) },
+    ]);
+    const { rpc, calls } = buildFakeDepthRpc({ rows, cells });
+    const result = asOk(
+      await computeVerifiedPoolDepthThresholds({
+        candidates: [{ pool: c1.pool, identity: c1.identity }, { pool: c2.pool, identity: c2.identity }],
+        tokenIn: NVDA,
+        amountsIn: LADDER,
+        thresholdsBps: THRESHOLDS,
+        rpc,
+        blockNumber: SUPPLIED_BLOCK,
+      }),
+    );
+    expect(calls.getBlockNumberCalls).toBe(0);
+    expect(calls.callsByKind["decimals"]).toBeGreaterThan(0);
+    expect(calls.callsByKind["spot"]).toBe(2);
+    expect(calls.callsByKind["quote"]).toBe(2 * LADDER.length);
+    expect(result.blockNumber).toBe(SUPPLIED_BLOCK);
+    // Every pool actually produced QUOTED cells — proving the fake RPC's
+    // own per-cell stub lookup (which is NOT keyed by block at all)
+    // was satisfied, i.e. every quote call reached the fake RPC and
+    // succeeded using the supplied block's code path.
+    expect(result.pools[0]!.row.cells.every((c) => c.status === "QUOTED")).toBe(true);
+    expect(result.pools[1]!.row.cells.every((c) => c.status === "QUOTED")).toBe(true);
+
+    // RELEASE-CRITICAL: every SINGLE `eth_call` this request made — the
+    // one shared decimals read (both sides), every V3/V4 spot read, and
+    // every V3/V4 quote call across both pools' full 12-point ladders —
+    // was made at EXACTLY the externally supplied block. `blockTag`
+    // defaults to `"latest"` on the fake RPC (mirroring the REAL
+    // client's own `blockTag = "latest"` default) precisely so that a
+    // production code path which forgot to thread `blockNumber` through
+    // to some downstream `rpc.call` — falling back to that default
+    // instead — is caught here: a strict `===` against the bigint
+    // `SUPPLIED_BLOCK` fails for BOTH a different block AND the string
+    // `"latest"`. Asserted against the exact expected call count (2
+    // decimals + 2 spot + 2*12 quote = 28), not just "at least one",
+    // so a call silently missing from the log can't hide a gap.
+    expect(calls.callLog).toHaveLength(2 + 2 + 2 * LADDER.length);
+    expect(calls.callLog.every((entry) => entry.blockTag === SUPPLIED_BLOCK)).toBe(true);
+    expect(calls.callLog.some((entry) => entry.blockTag === "latest")).toBe(false);
+  });
+
+  it("omitted blockNumber -> exactly one self-pin, unchanged from before this field existed", async () => {
+    const { pool, identity } = v3ComparisonCandidate({ pairAddress: V3_A, fee: 500 });
+    const rows: RowStub[] = [{ kind: "v3", toOrPoolId: V3_A }];
+    const cells: CellStub[] = LADDER.map((amountIn) => ({ v3Fee: 500, amountIn, quote: v3QuoteReturn({ amountOut: amountIn / 2n }) }));
+    const { rpc, calls } = buildFakeDepthRpc({ rows, cells });
+    const result = asOk(await computeVerifiedPoolDepthThresholds({ candidates: [{ pool, identity }], tokenIn: NVDA, amountsIn: LADDER, thresholdsBps: THRESHOLDS, rpc }));
+    expect(calls.getBlockNumberCalls).toBe(1);
+    expect(result.blockNumber).toBe(QUOTE_BLOCK);
+  });
+
+  it("omitted blockNumber + eth_blockNumber failure -> BLOCK_PIN_FAILURE, exactly as before this field existed", async () => {
+    const { pool, identity } = v3ComparisonCandidate({ pairAddress: V3_A, fee: 500 });
+    const { rpc, calls } = buildFakeDepthRpc({ rows: [], cells: [], getBlockNumber: { error: new Error("boom") } });
+    const result = await computeVerifiedPoolDepthThresholds({ candidates: [{ pool, identity }], tokenIn: NVDA, amountsIn: LADDER, thresholdsBps: THRESHOLDS, rpc });
+    expect(result.status).toBe("BLOCK_PIN_FAILURE");
+    expect(calls.getBlockNumberCalls).toBe(1);
+  });
+
+  it("supplied blockNumber + a getBlockNumber stub that ALWAYS throws -> the request still succeeds, because getBlockNumber must never be invoked at all", async () => {
+    const { pool, identity } = v3ComparisonCandidate({ pairAddress: V3_A, fee: 500 });
+    const rows: RowStub[] = [{ kind: "v3", toOrPoolId: V3_A }];
+    const cells: CellStub[] = LADDER.map((amountIn) => ({ v3Fee: 500, amountIn, quote: v3QuoteReturn({ amountOut: amountIn / 2n }) }));
+    const { rpc, calls } = buildFakeDepthRpc({
+      rows,
+      cells,
+      getBlockNumber: {
+        error: new Error("getBlockNumber must never be called when an external blockNumber is supplied"),
+      },
+    });
+    const result = asOk(
+      await computeVerifiedPoolDepthThresholds({ candidates: [{ pool, identity }], tokenIn: NVDA, amountsIn: LADDER, thresholdsBps: THRESHOLDS, rpc, blockNumber: SUPPLIED_BLOCK }),
+    );
+    expect(result.status).toBe("OK");
+    expect(result.blockNumber).toBe(SUPPLIED_BLOCK);
+    expect(calls.getBlockNumberCalls).toBe(0);
   });
 });
 

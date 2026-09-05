@@ -10,7 +10,8 @@ export type ExecutionComparisonErrorCode =
   | "MISSING_TOKEN_DECIMALS"
   | "VERIFICATION_DEGRADED"
   | "MATRIX_TOO_LARGE"
-  | "DEPTH_THRESHOLDS_TOO_LARGE";
+  | "DEPTH_THRESHOLDS_TOO_LARGE"
+  | "CROSS_MARKET_DEPTH_TOO_LARGE";
 
 export abstract class ExecutionComparisonError extends Error {
   abstract readonly code: ExecutionComparisonErrorCode;
@@ -155,6 +156,40 @@ export class DepthThresholdsTooLargeError extends ExecutionComparisonError {
     this.executableCandidates = executableCandidates;
     this.ladderLength = ladderLength;
     this.cells = cells;
+    this.max = max;
+  }
+}
+
+/**
+ * Phase 6H — Cross-Market Execution Synthesis. This orchestration
+ * layer's OWN fast-path rejection for an oversized cross-market
+ * request, thrown in `compareCrossMarket.ts` BEFORE the execution RPC
+ * client is created and BEFORE the shared block pin — the same
+ * "reject as cheaply as possible" discipline `MatrixTooLargeError`/
+ * `DepthThresholdsTooLargeError` already established, generalized
+ * across every SELECTED output group at once: the cap
+ * (`MAX_CROSS_MARKET_DEPTH_CELLS`) is REQUEST-WIDE, never per-group —
+ * two groups that would each individually pass the single-group
+ * `MAX_DEPTH_THRESHOLD_CELLS` cap can still combine to exceed this one.
+ * `totalExecutableCells` is computed via the SAME authoritative
+ * `classifyMatrixCandidates` every peer primitive already uses, summed
+ * across every selected group's own executable-candidate count x the
+ * frozen 12-point ladder length — never a raw candidate count, and
+ * never pool-quote's own `DepthThresholdsTooLargeError` (a different,
+ * single-group class from a different module — same module-independence
+ * policy this file's header comment already establishes).
+ */
+export class CrossMarketDepthTooLargeError extends ExecutionComparisonError {
+  readonly code = "CROSS_MARKET_DEPTH_TOO_LARGE" as const;
+  readonly totalExecutableCells: number;
+  readonly max: number;
+
+  constructor(totalExecutableCells: number, max: number) {
+    super(
+      `This cross-market request would require ${totalExecutableCells} total executable-depth cells across every selected output group, exceeding the maximum of ${max}.`,
+    );
+    this.name = "CrossMarketDepthTooLargeError";
+    this.totalExecutableCells = totalExecutableCells;
     this.max = max;
   }
 }
